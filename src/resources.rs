@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use sha1_smol::Sha1;
 
-const USER_AGENT: &str = "BlockLauncher/0.1.0 (+Rust native launcher)";
+use crate::brand;
+
+const USER_AGENT: &str = brand::USER_AGENT;
 const CACHE_TTL: Duration = Duration::from_secs(300);
 const CACHE_LIMIT: usize = 48;
 const MCIM_HOST: &str = "https://mod.mcimirror.top";

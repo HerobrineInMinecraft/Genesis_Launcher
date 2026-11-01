@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod brand;
 mod download;
 mod favorites;
 mod game;
@@ -297,7 +298,7 @@ fn main() -> eframe::Result {
         .unwrap_or([1440.0, 900.0]);
 
     let viewport = egui::ViewportBuilder::default()
-        .with_title("方块启动器")
+        .with_title(brand::NAME)
         .with_inner_size(requested_size)
         .with_min_inner_size([1080.0, 720.0])
         .with_max_inner_size(vector::ARTBOARD_SIZE)
@@ -315,7 +316,7 @@ fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        "方块启动器",
+        brand::NAME,
         options,
         Box::new(|cc| Ok(Box::new(LauncherApp::new(cc)))),
     )
@@ -477,7 +478,7 @@ pub fn apply_rounded_window() -> bool {
     use windows_sys::Win32::UI::Controls::MARGINS;
     use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
 
-    let title: Vec<u16> = "方块启动器\0".encode_utf16().collect();
+    let title: Vec<u16> = format!("{}\0", brand::NAME).encode_utf16().collect();
     let window = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
     if window.is_null() {
         return false;

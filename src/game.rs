@@ -9,6 +9,8 @@ use std::time::Duration;
 use serde_json::Value;
 use zip::ZipArchive;
 
+use crate::brand;
+
 const OFFLINE_UUID: &str = "00000000-0000-3000-8000-000000000001";
 const OFFLINE_NAME: &str = "Steve";
 
@@ -557,8 +559,8 @@ fn prepare_launch(
     let mut args = vec![
         "-Xms512M".to_owned(),
         format!("-Xmx{}M", options.max_memory_mb),
-        "-Dminecraft.launcher.brand=BlockLauncher".to_owned(),
-        "-Dminecraft.launcher.version=0.1.0".to_owned(),
+        format!("-Dminecraft.launcher.brand={}", brand::COMPACT_NAME),
+        format!("-Dminecraft.launcher.version={}", env!("CARGO_PKG_VERSION")),
         "-Dlog4j2.formatMsgNoLookups=true".to_owned(),
     ];
     for value in &merged.jvm_args {
@@ -1265,8 +1267,8 @@ fn placeholders(
         ),
         ("classpath", classpath.to_owned()),
         ("classpath_separator", separator.to_owned()),
-        ("launcher_name", "BlockLauncher".to_owned()),
-        ("launcher_version", "0.1.0".to_owned()),
+        ("launcher_name", brand::NAME.to_owned()),
+        ("launcher_version", env!("CARGO_PKG_VERSION").to_owned()),
         ("resolution_width", "1280".to_owned()),
         ("resolution_height", "720".to_owned()),
         ("quickPlayPath", String::new()),
@@ -1307,10 +1309,7 @@ fn legacy_game_args(placeholders: &HashMap<&str, String>) -> Vec<String> {
 }
 
 fn append_launcher_log(message: String) {
-    let Some(base) = std::env::var_os("APPDATA").map(PathBuf::from) else {
-        return;
-    };
-    let directory = base.join("BlockLauncher");
+    let directory = brand::data_directory();
     let path = directory.join("launcher.log");
     let _ = fs::create_dir_all(directory);
     if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {

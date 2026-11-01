@@ -9,7 +9,9 @@ use std::time::Duration;
 use serde_json::Value;
 use sha1_smol::Sha1;
 
-const USER_AGENT: &str = "BlockLauncher/0.1.0 (+Rust native launcher)";
+use crate::brand;
+
+const USER_AGENT: &str = brand::USER_AGENT;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoaderKind {

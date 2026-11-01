@@ -9,7 +9,9 @@ use serde_json::Value;
 use sha1_smol::Sha1;
 
 const NEWS_URL: &str = "https://launchercontent.mojang.com/v2/news.json";
-const USER_AGENT: &str = "BlockLauncher/0.1.0 (+Rust native launcher)";
+use crate::brand;
+
+const USER_AGENT: &str = brand::USER_AGENT;
 const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -297,12 +299,7 @@ fn plain_text(value: &str) -> String {
 }
 
 fn cache_directory() -> PathBuf {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("BlockLauncher")
-        .join("cache")
-        .join("minecraft-news")
+    brand::data_directory().join("cache").join("minecraft-news")
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ use eframe::egui::{
 };
 use eframe::{App, CreationContext, Frame};
 
+use crate::brand;
 use crate::game::JavaRuntime;
 use crate::loader::{LoaderInstallUpdate, LoaderKind, display_version as loader_display_version};
 use crate::news::MinecraftNews;
@@ -714,7 +715,18 @@ impl Default for LauncherSettings {
 impl LauncherSettings {
     fn load() -> Self {
         let mut settings = Self::default();
-        let Ok(contents) = std::fs::read_to_string(settings_path()) else {
+        let current_path = settings_path();
+        let legacy_path = legacy_settings_path();
+        let (load_path, migrate_to_current) = if current_path.is_file() {
+            (current_path, false)
+        } else if legacy_path.is_file() {
+            (legacy_path, true)
+        } else {
+            settings.game_directories = crate::game::discover_game_directories();
+            settings.game_directory = settings.game_directories.first().cloned();
+            return settings;
+        };
+        let Ok(contents) = std::fs::read_to_string(load_path) else {
             settings.game_directories = crate::game::discover_game_directories();
             settings.game_directory = settings.game_directories.first().cloned();
             return settings;
@@ -852,6 +864,9 @@ impl LauncherSettings {
             .is_some_and(crate::game::is_game_directory)
         {
             settings.game_directory = settings.game_directories.first().cloned();
+        }
+        if migrate_to_current {
+            let _ = settings.save();
         }
         settings
     }
@@ -996,11 +1011,11 @@ fn resolve_liquid_glass_setting(revision: u32, stored: Option<bool>) -> bool {
 }
 
 fn settings_path() -> PathBuf {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join("BlockLauncher")
-        .join("settings.ini")
+    brand::data_directory().join("settings.ini")
+}
+
+fn legacy_settings_path() -> PathBuf {
+    brand::legacy_data_directory().join("settings.ini")
 }
 
 fn parse_favorite_site(value: &str) -> Option<FavoriteSite> {
@@ -3893,11 +3908,11 @@ impl LauncherApp {
         theme::bold_text(
             painter,
             Pos2::new(36.0, 13.0),
-            "方块启动器",
+            brand::NAME,
             11.5,
             Color32::from_rgb(217, 226, 216),
         );
-        let tag_rect = Rect::from_min_size(Pos2::new(103.0, 14.5), Vec2::new(55.0, 15.0));
+        let tag_rect = Rect::from_min_size(Pos2::new(145.0, 14.5), Vec2::new(55.0, 15.0));
         theme::fill_round(
             painter,
             tag_rect,
@@ -3913,7 +3928,7 @@ impl LauncherApp {
         );
         theme::mono_text(
             painter,
-            Pos2::new(111.0, 16.0),
+            Pos2::new(153.0, 16.0),
             "PREVIEW",
             7.5,
             Color32::from_rgb(144, 198, 137),
@@ -11807,14 +11822,14 @@ impl LauncherApp {
                 theme::bold_text(
                     painter,
                     Pos2::new(info_left, card.top() + 34.0),
-                    "方块启动器",
+                    brand::NAME,
                     25.0,
                     theme::INK,
                 );
                 theme::text(
                     painter,
                     Pos2::new(info_left + 1.0, card.top() + 68.0),
-                    "Version 0.1.0 · 原生桌面启动器",
+                    "方块启动器 · Version 0.1.0 · 原生桌面",
                     9.4,
                     theme::MUTED,
                 );
@@ -13440,7 +13455,7 @@ fn page_card_anchor(page: Page, layout: &Layout) -> Rect {
 
 fn page_kicker(page: Page) -> &'static str {
     match page {
-        Page::Home => "BLOCK LAUNCHER",
+        Page::Home => "GENESIS LAUNCHER",
         Page::Versions => "VERSION LIBRARY",
         Page::Download => "MINECRAFT DOWNLOADS",
         Page::Community => "FAVORITES & MODS",
@@ -13925,7 +13940,7 @@ mod tests {
     #[test]
     fn writes_fabric_mod_project_skeleton() {
         let root = std::env::temp_dir().join(format!(
-            "block-launcher-mod-project-{}",
+            "genesis-launcher-mod-project-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -13963,7 +13978,7 @@ mod tests {
     #[test]
     fn exports_version_archive_with_selected_content() {
         let root = std::env::temp_dir().join(format!(
-            "block-launcher-export-test-{}",
+            "genesis-launcher-export-test-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -14218,7 +14233,7 @@ fn export_version_archive(
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o644);
     let manifest = serde_json::json!({
-        "format": "BlockLauncherVersionExport",
+        "format": "GenesisLauncherVersionExport",
         "version": version.version,
         "minecraftVersion": version.game_version,
         "loader": version.loader,

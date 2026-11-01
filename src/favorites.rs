@@ -3,7 +3,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-const USER_AGENT: &str = "BlockLauncher/0.1.0 (+Rust native launcher)";
+use crate::brand;
+
+const USER_AGENT: &str = brand::USER_AGENT;
 
 pub const BUILTIN_SITES: &[(&str, &str)] = &[
     ("Minecraft 官方网站", "https://www.minecraft.net/"),

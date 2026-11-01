@@ -2,7 +2,7 @@
 name = "wdsjqdq"
 version = "0.1.0"
 edition = "2024"
-description = "A Minecraft-inspired desktop launcher UI"
+description = "Genesis Launcher, a native Minecraft desktop launcher"
 
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "system_fonts"] }

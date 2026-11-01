@@ -1,4 +1,6 @@
-# 方块启动器
+# Genesis Launcher
+
+方块启动器（Genesis Launcher）
 
 一个使用 Rust 和 egui 构建的原生 Minecraft 风格桌面启动器。程序直接创建 Win32 窗口，不使用 WebView、HTML、CSS、JavaScript 或本地网页服务。
 

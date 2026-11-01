@@ -11,9 +11,11 @@ use serde_json::Value;
 use sha1_smol::Sha1;
 use zip::ZipArchive;
 
+use crate::brand;
+
 const MANIFEST_URL: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 const JAVA_RUNTIME_MANIFEST_URL: &str = "https://launchermeta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json";
-const USER_AGENT: &str = "BlockLauncher/0.1.0 (+Rust native launcher)";
+const USER_AGENT: &str = brand::USER_AGENT;
 const WORKERS: usize = 6;
 
 #[derive(Clone, Debug)]
@@ -1055,12 +1057,7 @@ fn agent() -> ureq::Agent {
 }
 
 fn cache_directory() -> PathBuf {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("BlockLauncher")
-        .join("cache")
-        .join("mojang")
+    brand::data_directory().join("cache").join("mojang")
 }
 
 #[cfg(test)]

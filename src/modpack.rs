@@ -11,7 +11,9 @@ use zip::ZipArchive;
 
 use crate::loader::LoaderKind;
 
-const USER_AGENT: &str = "BlockLauncher/0.1.0 (+Rust native launcher)";
+use crate::brand;
+
+const USER_AGENT: &str = brand::USER_AGENT;
 const MCIM_HOST: &str = "https://mod.mcimirror.top";
 
 #[derive(Clone, Debug)]
@@ -531,7 +533,7 @@ mod tests {
     #[test]
     fn reads_modrinth_manifest_and_extracts_overrides() {
         let root = std::env::temp_dir().join(format!(
-            "block-launcher-modpack-test-{}",
+            "genesis-launcher-modpack-test-{}",
             std::process::id()
         ));
         fs::create_dir_all(&root).unwrap();
