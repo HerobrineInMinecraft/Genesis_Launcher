@@ -1,37 +1,51 @@
-# 方块启动器
+# Genesis Launcher
 
-一个使用 Rust 和 egui 构建的原生 Minecraft 风格桌面启动器。程序直接创建 Win32 窗口，不使用 WebView、HTML、CSS、JavaScript 或本地网页服务。
+这是一个使用 Rust 构建的原生 Minecraft 启动器。它不依赖 WebView、HTML、CSS 或 JavaScript，从界面渲染到游戏启动均由桌面程序直接完成。
 
-当前主界面包含：
+## 下载
 
-- 原生 GPU 绘制的方块世界场景
-- iOS 风格液态玻璃：GPU 背景折射与模糊、透镜边缘、液态焦散高光和环境光
-- 跟随鼠标位置的双层柔光与高光，可被液态玻璃折射
-- 外观设置可实时调整玻璃透明度、鼠标光亮度、范围和刷新率
-- 648 DPI 固定矢量设计基准，保持原 1440×900 界面尺寸
-- 玩家账户与版本切换菜单
-- 右上角版本选择按最近游玩时间排序，并读取官方启动器的游玩记录
-- 自动发现 `.minecraft` 目录与可启动版本
-- 主视觉卡片直接显示最近存档的 `icon.png` 世界截图或服务器图标，并支持快速继续
-- 读取版本清单、解压 natives 并调用本机 Java 启动游戏
-- 接入 Mojang Piston Meta 与官方资源 CDN，启动时自动补全缺失文件
-- 浏览下载正式版、快照及历史版本，校验 SHA1、ETag 与 `.part` 临时文件
-- 自动复用官方启动器 Java 运行时；缺失时读取 Mojang Java Runtime Manifest
-- 显示文件补全阶段、进度、速度和剩余文件数
-- 游戏运行期间显示运行状态，再次点击可强制关闭
-- 可配置游戏窗口尺寸、全屏模式、额外 JVM 参数和启动后行为
-- Mojang 官方 Minecraft 最新动态、封面、文章详情和官网跳转
-- 启动状态反馈、快捷键与窗口控制
-- 自适应桌面布局
+GitHub Releases：
 
-## 运行
+https://github.com/HerobrineInMinecraft/Genesis_Launcher/releases
 
-```powershell
-cargo run --release
-```
+下载 `Genesis.Launcher.exe` 后直接运行即可。
 
-也可以直接运行构建后的 `target\release\wdsjqdq.exe`。
+## 主要功能
 
-正式文件的版本安装与启动前补全使用 Mojang Piston Meta、资源 CDN 和 Java Runtime Manifest。Java 运行时原始文件由 Mojang 的 `piston-data.mojang.com` 提供。所有下载地址都经过官方域名白名单检查和 SHA1 校验。
+- 接入 Mojang Piston Meta 官方下载源，可下载、校验并补全游戏版本、资源文件和 Windows Native 文件。
+- 支持启动游戏、查看运行状态，并可强制关闭当前游戏。
+- 支持 Fabric、Forge、NeoForge 加载器版本获取与安装。
+- 支持多 Minecraft 文件夹、默认版本隔离和单版本内存分配。
+- 支持 Modrinth 模组、整合包、光影、资源包和数据包浏览与下载。
+- 支持 `.mrpack` 和 Modrinth 整合包导入，并自动补全对应的游戏与加载器环境。
+- 内置 3D 皮肤编辑器，支持 Steve/Alex、完整 RGB 调色、模型表面绘制、撤销/重做和 PNG 导入导出；当前仅支持本地编辑与导出。
+- 已预留 Fabric、Forge、NeoForge 模组制作界面。
+- 收藏页内置 Minecraft 官网、Wiki、Modrinth、CurseForge、MCMod 和 Planet Minecraft，并支持自定义网站和图标。
+- 提供液态玻璃、动态界面、鼠标光效和强制自动更新等体验功能。
 
-当前使用离线玩家档案 `Steve` 启动游戏，可以进入单人游戏。连接需要正版验证的服务器仍需另行接入 Microsoft OAuth、Xbox Live/XSTS 和 Minecraft Services 登录。官方版本安装完成后可选择 Fabric、Forge 或 NeoForge，并按所选加载器版本执行实际安装。
+## 更新方式
+
+启动器会从 GitHub Releases 检查正式版本。检测到更高版本后，会自动下载新程序、校验 SHA-256、替换旧文件并重新启动，不需要手动覆盖。
+
+## 当前说明
+
+1.0.0 使用离线玩家 `Steve`，尚未接入 Microsoft OAuth、Xbox Live 和 Minecraft Services 在线认证，因此暂时不能连接需要正版验证的服务器。
+
+当前版本暂不支持更换账户皮肤。
+
+当前版本暂不支持更改玩家名称。
+
+模组制作暂不可用，相关功能将在后续版本开放。
+
+当前版本面向 Windows 10/11 64 位系统。下载和安装 Minecraft 时需要网络连接，启动游戏则需要对应版本的 Java。
+
+## 问题反馈
+
+如果遇到启动失败、下载异常、界面显示或版本兼容问题，请在 GitHub Issues 中提供：
+
+- Genesis Launcher 版本
+- Minecraft 版本和加载器版本
+- 问题截图
+- `launcher-java.log` 或更新错误日志
+
+感谢试用 Genesis Launcher。
