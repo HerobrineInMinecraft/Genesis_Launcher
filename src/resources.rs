@@ -61,7 +61,7 @@ impl ResourceCategory {
             Self::Modpack => "downloads/modpacks",
             Self::Shader => "shaderpacks",
             Self::ResourcePack => "resourcepacks",
-            Self::Datapack => "downloads/datapacks",
+            Self::Datapack => "datapacks",
         }
     }
 }
@@ -135,7 +135,7 @@ pub fn start_download(
     category: ResourceCategory,
     game_version: String,
     loader: Option<String>,
-    game_directory: PathBuf,
+    destination_file: PathBuf,
 ) -> mpsc::Receiver<Result<PathBuf, String>> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
@@ -144,7 +144,7 @@ pub fn start_download(
             category,
             &game_version,
             loader.as_deref(),
-            &game_directory,
+            &destination_file,
         );
         let _ = sender.send(result);
     });
@@ -219,10 +219,10 @@ fn search_facets(category: ResourceCategory, game_version: &str, loader: Option<
 
 fn download(
     project: &ResourceProject,
-    category: ResourceCategory,
+    _category: ResourceCategory,
     game_version: &str,
     loader: Option<&str>,
-    game_directory: &Path,
+    destination_file: &Path,
 ) -> Result<PathBuf, String> {
     let url = format!(
         "https://api.modrinth.com/v2/project/{}/version",
@@ -277,19 +277,13 @@ fn download(
     if !allowed_url(download_url) {
         return Err("拒绝非 Modrinth 官方下载地址".to_owned());
     }
-    let filename = file
-        .get("filename")
-        .and_then(Value::as_str)
-        .and_then(|name| Path::new(name).file_name())
-        .map(|name| name.to_string_lossy().into_owned())
-        .ok_or_else(|| "Modrinth 下载文件名无效".to_owned())?;
     let expected = file
         .pointer("/hashes/sha1")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let target_dir = game_directory.join(category.target_folder());
-    fs::create_dir_all(&target_dir).map_err(|error| format!("无法创建下载目录：{error}"))?;
-    let target = target_dir.join(filename);
+    let target_dir = destination_file.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(target_dir).map_err(|error| format!("无法创建下载目录：{error}"))?;
+    let target = destination_file.to_path_buf();
     let part = target.with_extension("part");
     let bytes = request_bytes_with_mirror(download_url)?;
     if expected.len() == 40
@@ -306,6 +300,29 @@ fn download(
     }
     fs::rename(&part, &target).map_err(|error| format!("提交下载文件失败：{error}"))?;
     Ok(target)
+}
+
+pub fn sanitize_download_filename(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+            {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    if sanitized.trim_matches(['.', ' ']).is_empty() {
+        "download".to_owned()
+    } else {
+        sanitized
+    }
 }
 
 fn request_text(url: &str) -> Result<String, String> {
@@ -635,5 +652,16 @@ mod tests {
             ModrinthRoute::Mirror
         );
         assert_eq!(fastest_modrinth_route(&[]), ModrinthRoute::Official);
+    }
+
+    #[test]
+    fn datapacks_use_the_version_datapacks_directory() {
+        assert_eq!(ResourceCategory::Datapack.target_folder(), "datapacks");
+    }
+
+    #[test]
+    fn sanitizes_invalid_download_file_names() {
+        assert_eq!(sanitize_download_filename("bad:name?.jar"), "bad_name_.jar");
+        assert_eq!(sanitize_download_filename("..."), "download");
     }
 }

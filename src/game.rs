@@ -31,6 +31,7 @@ pub struct LaunchOptions {
     pub quick_play: Option<QuickPlayTarget>,
     pub data_directory: Option<PathBuf>,
     pub java_path: Option<PathBuf>,
+    pub player_name: String,
 }
 
 #[derive(Clone, Debug)]
@@ -50,6 +51,7 @@ impl Default for LaunchOptions {
             quick_play: None,
             data_directory: None,
             java_path: None,
+            player_name: OFFLINE_NAME.to_owned(),
         }
     }
 }
@@ -548,6 +550,7 @@ fn prepare_launch(
         &classpath_value,
         separator,
     );
+    placeholders.insert("auth_player_name", options.player_name.clone());
     if let Some(quick_play) = &options.quick_play {
         let (key, value) = match quick_play {
             QuickPlayTarget::World(world) => ("quickPlaySingleplayer", world),

@@ -4,6 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{
@@ -33,6 +34,7 @@ const SETTING_CARD_PADDING_X: f32 = 14.0;
 const CONTENT_CLOSE_BOUNCE_SECONDS: f32 = 0.18;
 const SKIN_HISTORY_LIMIT: usize = 64;
 const SETTINGS_REVISION: u32 = 2;
+static ANIMATION_STRENGTH: AtomicU16 = AtomicU16::new(100);
 
 #[derive(Clone)]
 struct GameVersion {
@@ -389,6 +391,7 @@ enum VersionContentKind {
     Saves,
     ShaderPacks,
     ResourcePacks,
+    Datapacks,
     Export,
 }
 
@@ -399,6 +402,7 @@ impl VersionContentKind {
             Self::Saves => "saves",
             Self::ShaderPacks => "shaderpacks",
             Self::ResourcePacks => "resourcepacks",
+            Self::Datapacks => "datapacks",
             Self::Export => "",
         }
     }
@@ -409,6 +413,7 @@ impl VersionContentKind {
             Self::Saves => "存档",
             Self::ShaderPacks => "光影",
             Self::ResourcePacks => "材质包",
+            Self::Datapacks => "数据包",
             Self::Export => "导出",
         }
     }
@@ -419,7 +424,8 @@ impl VersionContentKind {
             Self::Saves => 1,
             Self::ShaderPacks => 2,
             Self::ResourcePacks => 3,
-            Self::Export => 4,
+            Self::Datapacks => 4,
+            Self::Export => 5,
         }
     }
 }
@@ -637,6 +643,45 @@ impl SettingsSection {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnimationLevel {
+    Off,
+    Weak,
+    Medium,
+    Strong,
+}
+
+impl AnimationLevel {
+    const ALL: [Self; 4] = [Self::Off, Self::Weak, Self::Medium, Self::Strong];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Off => "关",
+            Self::Weak => "弱",
+            Self::Medium => "中",
+            Self::Strong => "强",
+        }
+    }
+
+    fn strength(self) -> f32 {
+        match self {
+            Self::Off => 0.0,
+            Self::Weak => 0.58,
+            Self::Medium => 1.0,
+            Self::Strong => 1.42,
+        }
+    }
+
+    fn stored(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Weak => "weak",
+            Self::Medium => "medium",
+            Self::Strong => "strong",
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct LauncherSettings {
     memory_mb: u16,
@@ -651,33 +696,20 @@ struct LauncherSettings {
     window_height: u32,
     fullscreen: bool,
     extra_jvm_args: String,
+    player_name: String,
+    player_skin: Option<PathBuf>,
+    player_skin_model_alex: bool,
     notify_after_launch: bool,
     hide_after_launch: bool,
-    animations: bool,
+    animation_level: AnimationLevel,
     tooltips: bool,
-    liquid_glass: bool,
-    liquid_glass_mode: LiquidGlassMode,
+    appearance_mode: theme::AppearanceMode,
     glass_transparency: u16,
     pointer_brightness: u16,
     pointer_radius: u16,
     pointer_refresh_rate: u16,
     favorite_sites: Vec<FavoriteSite>,
     recent_versions: Vec<RecentPlay>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LiquidGlassMode {
-    Regular,
-    Clear,
-}
-
-impl LiquidGlassMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Regular => "常规型",
-            Self::Clear => "透明型",
-        }
-    }
 }
 
 impl Default for LauncherSettings {
@@ -695,12 +727,14 @@ impl Default for LauncherSettings {
             window_height: 720,
             fullscreen: false,
             extra_jvm_args: String::new(),
+            player_name: "Steve".to_owned(),
+            player_skin: None,
+            player_skin_model_alex: false,
             notify_after_launch: true,
             hide_after_launch: false,
-            animations: true,
+            animation_level: AnimationLevel::Medium,
             tooltips: true,
-            liquid_glass: false,
-            liquid_glass_mode: LiquidGlassMode::Regular,
+            appearance_mode: theme::AppearanceMode::Simple,
             glass_transparency: 82,
             pointer_brightness: 100,
             pointer_radius: 155,
@@ -732,6 +766,10 @@ impl LauncherSettings {
         };
         let mut settings_revision = 0;
         let mut stored_liquid_glass = None;
+        let mut stored_liquid_glass_mode = None;
+        let mut stored_appearance_mode = None;
+        let mut stored_animation_level = None;
+        let mut stored_legacy_animations = None;
         for line in contents.lines() {
             let Some((key, value)) = line.split_once('=') else {
                 continue;
@@ -781,20 +819,41 @@ impl LauncherSettings {
                 }
                 "fullscreen" => settings.fullscreen = value == "true",
                 "jvm_args" => settings.extra_jvm_args = value.to_owned(),
+                "player_name" => {
+                    if let Ok(name) = normalize_player_name(value) {
+                        settings.player_name = name;
+                    }
+                }
+                "player_skin" => {
+                    if !value.is_empty() {
+                        settings.player_skin = Some(PathBuf::from(value));
+                    }
+                }
+                "player_skin_model_alex" => {
+                    settings.player_skin_model_alex = value == "true";
+                }
                 "notify_after_launch" => settings.notify_after_launch = value == "true",
                 "hide_after_launch" => settings.hide_after_launch = value == "true",
-                "animations" => settings.animations = value == "true",
+                "animation_level" => {
+                    stored_animation_level = match value {
+                        "off" => Some(AnimationLevel::Off),
+                        "weak" => Some(AnimationLevel::Weak),
+                        "medium" => Some(AnimationLevel::Medium),
+                        "strong" => Some(AnimationLevel::Strong),
+                        _ => None,
+                    }
+                }
+                "animations" => stored_legacy_animations = Some(value == "true"),
                 "tooltips" => settings.tooltips = value == "true",
                 "settings_revision" => {
                     settings_revision = value.parse().unwrap_or_default();
                 }
+                "appearance_mode" => {
+                    stored_appearance_mode = theme::AppearanceMode::from_stored(value)
+                }
                 "liquid_glass" => stored_liquid_glass = Some(value == "true"),
                 "liquid_glass_mode" => {
-                    settings.liquid_glass_mode = if value == "clear" {
-                        LiquidGlassMode::Clear
-                    } else {
-                        LiquidGlassMode::Regular
-                    }
+                    stored_liquid_glass_mode = Some(value.to_owned());
                 }
                 "glass_transparency" => {
                     settings.glass_transparency =
@@ -830,8 +889,17 @@ impl LauncherSettings {
                 _ => {}
             }
         }
-        settings.liquid_glass =
-            resolve_liquid_glass_setting(settings_revision, stored_liquid_glass);
+        settings.appearance_mode = resolve_appearance_mode(
+            settings_revision,
+            stored_appearance_mode,
+            stored_liquid_glass,
+            stored_liquid_glass_mode.as_deref(),
+        );
+        settings.animation_level =
+            stored_animation_level.unwrap_or(match stored_legacy_animations {
+                Some(false) => AnimationLevel::Off,
+                _ => AnimationLevel::Medium,
+            });
         settings.memory_mb = settings.memory_mb.clamp(2048, 16384);
         settings.window_width = settings.window_width.clamp(640, 7680);
         settings.window_height = settings.window_height.clamp(360, 4320);
@@ -867,6 +935,10 @@ impl LauncherSettings {
             let _ = settings.save();
         }
         settings
+    }
+
+    fn animations_enabled(&self) -> bool {
+        self.animation_level != AnimationLevel::Off
     }
 
     fn add_game_directory(&mut self, directory: PathBuf) {
@@ -938,7 +1010,7 @@ impl LauncherSettings {
             std::fs::create_dir_all(parent)?;
         }
         let mut contents = format!(
-            "memory_mb={}\ngame_directory={}\ngame_directories={}\nversion_isolation={}\njava_path={}\nshow_loader_versions={}\nwindow_width={}\nwindow_height={}\nfullscreen={}\njvm_args={}\nnotify_after_launch={}\nhide_after_launch={}\nanimations={}\ntooltips={}\nsettings_revision={}\nliquid_glass={}\nliquid_glass_mode={}\nglass_transparency={}\npointer_brightness={}\npointer_radius={}\npointer_refresh_rate={}\n",
+            "memory_mb={}\ngame_directory={}\ngame_directories={}\nversion_isolation={}\njava_path={}\nshow_loader_versions={}\nwindow_width={}\nwindow_height={}\nfullscreen={}\njvm_args={}\nplayer_name={}\nplayer_skin={}\nplayer_skin_model_alex={}\nnotify_after_launch={}\nhide_after_launch={}\nanimation_level={}\ntooltips={}\nsettings_revision={}\nappearance_mode={}\nglass_transparency={}\npointer_brightness={}\npointer_radius={}\npointer_refresh_rate={}\n",
             self.memory_mb,
             self.game_directory
                 .as_ref()
@@ -959,15 +1031,21 @@ impl LauncherSettings {
             self.window_height,
             self.fullscreen,
             self.extra_jvm_args.replace(['\r', '\n'], " "),
+            self.player_name,
+            self.player_skin
+                .as_ref()
+                .map(|path| path.to_string_lossy())
+                .unwrap_or_default(),
+            self.player_skin_model_alex,
             self.notify_after_launch,
             self.hide_after_launch,
-            self.animations,
+            self.animation_level.stored(),
             self.tooltips,
             SETTINGS_REVISION,
-            self.liquid_glass,
-            match self.liquid_glass_mode {
-                LiquidGlassMode::Regular => "regular",
-                LiquidGlassMode::Clear => "clear",
+            match self.appearance_mode {
+                theme::AppearanceMode::Simple => "simple",
+                theme::AppearanceMode::Frosted => "frosted",
+                theme::AppearanceMode::Liquid => "liquid",
             },
             self.glass_transparency,
             self.pointer_brightness,
@@ -999,11 +1077,22 @@ impl LauncherSettings {
     }
 }
 
-fn resolve_liquid_glass_setting(revision: u32, stored: Option<bool>) -> bool {
-    if revision >= SETTINGS_REVISION {
-        stored.unwrap_or(false)
-    } else {
-        false
+fn resolve_appearance_mode(
+    _revision: u32,
+    stored_mode: Option<theme::AppearanceMode>,
+    legacy_enabled: Option<bool>,
+    legacy_style: Option<&str>,
+) -> theme::AppearanceMode {
+    if let Some(mode) = stored_mode {
+        return mode;
+    }
+    match legacy_enabled {
+        Some(true) if legacy_style.is_some_and(|style| style.eq_ignore_ascii_case("clear")) => {
+            theme::AppearanceMode::Liquid
+        }
+        Some(true) => theme::AppearanceMode::Frosted,
+        Some(false) => theme::AppearanceMode::Simple,
+        None => theme::AppearanceMode::Simple,
     }
 }
 
@@ -1025,6 +1114,20 @@ fn parse_favorite_site(value: &str) -> Option<FavoriteSite> {
         url: url.to_owned(),
         icon_source: icon_source.to_owned(),
     })
+}
+
+fn normalize_player_name(value: &str) -> Result<String, String> {
+    let name = value.trim();
+    if !(3..=16).contains(&name.len()) {
+        return Err("玩家名称长度必须为 3–16 个字符".to_owned());
+    }
+    if !name
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return Err("玩家名称只能包含英文字母、数字和下划线".to_owned());
+    }
+    Ok(name.to_owned())
 }
 
 fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
@@ -1142,6 +1245,8 @@ pub struct LauncherApp {
     menu: Menu,
     version_popup_value: f32,
     version_popup_velocity: f32,
+    profile_popup_value: f32,
+    profile_popup_velocity: f32,
     news: Option<usize>,
     launch_started: Option<Instant>,
     launch_complete: bool,
@@ -1160,6 +1265,7 @@ pub struct LauncherApp {
     report_dpi: bool,
     dpi_reported: bool,
     page: Page,
+    page_history: Vec<Page>,
     nav_selected: usize,
     nav_highlight_y: f32,
     nav_highlight_velocity: f32,
@@ -1188,6 +1294,11 @@ pub struct LauncherApp {
     favorite_editor_card_target: Rect,
     favorite_editor_target_scroll: f32,
     favorite_editor_pending_site: Option<FavoriteSite>,
+    account_name_dialog_open: bool,
+    account_name_dialog_value: f32,
+    account_name_dialog_velocity: f32,
+    account_name_input: String,
+    account_name_error: Option<String>,
     favorite_icon_receiver: Option<FavoriteIconReceiver>,
     favorite_icon_attempted: Vec<String>,
     favorite_icon_textures: HashMap<String, egui::TextureHandle>,
@@ -1317,6 +1428,7 @@ pub struct LauncherApp {
     resource_search_error: Option<String>,
     resource_prefetched_key: Option<String>,
     resource_version_filter: String,
+    resource_target_profile: Option<String>,
     resource_version_menu_open: bool,
     resource_version_anchor: Rect,
     resource_version_scroll: f32,
@@ -1324,6 +1436,7 @@ pub struct LauncherApp {
     resource_scroll: f32,
     resource_download_receiver: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     resource_download_name: Option<String>,
+    resource_download_directories: HashMap<ResourceCategory, PathBuf>,
     official_filter: VersionFilter,
     install_receiver: Option<std::sync::mpsc::Receiver<crate::download::InstallUpdate>>,
     install_progress: Option<crate::download::InstallUpdate>,
@@ -1374,6 +1487,7 @@ impl LauncherApp {
         let download_loader_open = args.iter().any(|arg| arg == "--download-loader");
         let resource_version_menu_open = args.iter().any(|arg| arg == "--resource-version-menu");
         let favorite_editor_open = args.iter().any(|arg| arg == "--favorite-editor");
+        let account_name_dialog_open = args.iter().any(|arg| arg == "--account-name");
         let initial_create_tab = if args.iter().any(|arg| arg == "--create-mod") {
             1
         } else {
@@ -1403,6 +1517,7 @@ impl LauncherApp {
                     "saves" => Some(VersionContentKind::Saves),
                     "shaders" => Some(VersionContentKind::ShaderPacks),
                     "resourcepacks" => Some(VersionContentKind::ResourcePacks),
+                    "datapacks" => Some(VersionContentKind::Datapacks),
                     "export" => Some(VersionContentKind::Export),
                     _ => None,
                 })
@@ -1462,10 +1577,13 @@ impl LauncherApp {
         };
         let mut settings = LauncherSettings::load();
         if args.iter().any(|arg| arg == "--no-liquid-glass") {
-            settings.liquid_glass = false;
+            settings.appearance_mode = theme::AppearanceMode::Simple;
         }
         if args.iter().any(|arg| arg == "--clear-liquid-glass") {
-            settings.liquid_glass_mode = LiquidGlassMode::Clear;
+            settings.appearance_mode = theme::AppearanceMode::Liquid;
+        }
+        if args.iter().any(|arg| arg == "--frosted-glass") {
+            settings.appearance_mode = theme::AppearanceMode::Frosted;
         }
         let initial_nav = match page {
             Page::Versions => 1,
@@ -1537,12 +1655,26 @@ impl LauncherApp {
         let official_manifest = Some(crate::download::start_manifest_fetch());
         let news_receiver = Some(crate::news::start_fetch());
         let launcher_update_receiver = Some(update::start_latest_release_check(&cc.egui_ctx));
+        let mut initial_skin_status = None;
+        let initial_skin_pixels = if let Some(path) = settings.player_skin.as_ref() {
+            match load_player_skin(path) {
+                Ok(pixels) => pixels,
+                Err(error) => {
+                    initial_skin_status = Some(error);
+                    default_skin_pixels()
+                }
+            }
+        } else {
+            default_skin_pixels()
+        };
 
         Self {
             selected_version,
             menu: initial_menu,
             version_popup_value: 0.0,
             version_popup_velocity: 0.0,
+            profile_popup_value: 0.0,
+            profile_popup_velocity: 0.0,
             news: None,
             launch_started: None,
             launch_complete: false,
@@ -1561,6 +1693,7 @@ impl LauncherApp {
             report_dpi,
             dpi_reported: false,
             page,
+            page_history: Vec::new(),
             nav_selected: initial_nav,
             nav_highlight_y: 0.0,
             nav_highlight_velocity: 0.0,
@@ -1589,6 +1722,15 @@ impl LauncherApp {
             favorite_editor_card_target: Rect::NOTHING,
             favorite_editor_target_scroll: 0.0,
             favorite_editor_pending_site: None,
+            account_name_dialog_open,
+            account_name_dialog_value: 0.0,
+            account_name_dialog_velocity: 0.0,
+            account_name_input: if account_name_dialog_open {
+                settings.player_name.clone()
+            } else {
+                String::new()
+            },
+            account_name_error: None,
             favorite_icon_receiver: None,
             favorite_icon_attempted: Vec::new(),
             favorite_icon_textures,
@@ -1597,8 +1739,8 @@ impl LauncherApp {
             resource_detail_velocity: 0.0,
             resource_detail_direction: 1.0,
             create_tab: initial_create_tab,
-            skin_pixels: default_skin_pixels(),
-            skin_model_alex: false,
+            skin_pixels: initial_skin_pixels,
+            skin_model_alex: settings.player_skin_model_alex,
             skin_color: [76, 175, 80, 255],
             skin_erasing: false,
             skin_preview_yaw: -0.42,
@@ -1609,7 +1751,7 @@ impl LauncherApp {
             skin_preview_last_face: None,
             skin_history: SkinEditHistory::default(),
             skin_stroke_before: None,
-            skin_status: None,
+            skin_status: initial_skin_status,
             mod_name_input: "My Mod".to_owned(),
             mod_id_input: "mymod".to_owned(),
             mod_package_input: "com.example.mymod".to_owned(),
@@ -1722,6 +1864,7 @@ impl LauncherApp {
             resource_search_error: None,
             resource_prefetched_key: None,
             resource_version_filter: initial_resource_version,
+            resource_target_profile: None,
             resource_version_menu_open,
             resource_version_anchor: Rect::NOTHING,
             resource_version_scroll: 0.0,
@@ -1729,6 +1872,7 @@ impl LauncherApp {
             resource_scroll: 0.0,
             resource_download_receiver: None,
             resource_download_name: None,
+            resource_download_directories: HashMap::new(),
             official_filter: VersionFilter::All,
             install_receiver: None,
             install_progress: None,
@@ -1951,10 +2095,13 @@ impl LauncherApp {
 
     fn update_popup_animation(&mut self, ctx: &egui::Context) {
         let version_target = if self.menu == Menu::Version { 1.0 } else { 0.0 };
+        let profile_target = if self.menu == Menu::Profile { 1.0 } else { 0.0 };
         let launch_target = if self.launch_settings_open { 1.0 } else { 0.0 };
-        if !self.settings.animations {
+        if !self.settings.animations_enabled() {
             self.version_popup_value = version_target;
             self.version_popup_velocity = 0.0;
+            self.profile_popup_value = profile_target;
+            self.profile_popup_velocity = 0.0;
             self.launch_popup_value = launch_target;
             self.launch_popup_velocity = 0.0;
             return;
@@ -1966,19 +2113,25 @@ impl LauncherApp {
             version_target,
             delta,
         );
+        let profile_active = spring_popup(
+            &mut self.profile_popup_value,
+            &mut self.profile_popup_velocity,
+            profile_target,
+            delta,
+        );
         let launch_active = spring_popup(
             &mut self.launch_popup_value,
             &mut self.launch_popup_velocity,
             launch_target,
             delta,
         );
-        if version_active || launch_active {
+        if version_active || profile_active || launch_active {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
 
     fn update_navigation_animation(&mut self, ctx: &egui::Context) {
-        if !self.settings.animations {
+        if !self.settings.animations_enabled() {
             self.nav_highlight_velocity = 0.0;
             self.previous_page = None;
             self.page_transition_progress = 1.0;
@@ -2008,7 +2161,7 @@ impl LauncherApp {
 
     fn update_download_animations(&mut self, ctx: &egui::Context) {
         let category_target = resource_category_index(self.download_resource_category) as f32;
-        if !self.settings.animations {
+        if !self.settings.animations_enabled() {
             self.download_category_position = category_target;
             self.download_category_velocity = 0.0;
             self.download_page_progress = 1.0;
@@ -2068,7 +2221,7 @@ impl LauncherApp {
             self.nav_tooltip_target = false;
         }
         let target = if self.nav_tooltip_target { 1.0 } else { 0.0 };
-        if !self.settings.animations {
+        if !self.settings.animations_enabled() {
             self.nav_tooltip_value = target;
             self.nav_tooltip_velocity = 0.0;
         } else {
@@ -2085,7 +2238,7 @@ impl LauncherApp {
     }
 
     fn update_settings_animation(&mut self, ctx: &egui::Context) {
-        if !self.settings.animations {
+        if !self.settings.animations_enabled() {
             self.previous_settings_section = None;
             self.settings_transition_progress = 1.0;
             self.settings_transition_velocity = 0.0;
@@ -2110,7 +2263,7 @@ impl LauncherApp {
     }
 
     fn update_detail_animations(&mut self, ctx: &egui::Context) {
-        if !self.settings.animations {
+        if !self.settings.animations_enabled() {
             self.previous_version_detail = None;
             self.version_detail_progress = 1.0;
             self.version_detail_velocity = 0.0;
@@ -2191,7 +2344,7 @@ impl LauncherApp {
         } else {
             0.0
         };
-        if !self.settings.animations {
+        if !self.settings.animations_enabled() {
             self.version_content_popup_value = target;
             self.version_content_popup_velocity = 0.0;
             self.version_content_close_elapsed = 0.0;
@@ -2269,14 +2422,83 @@ impl LauncherApp {
         self.resource_detail_velocity = 0.0;
     }
 
+    fn resource_target_version(&self, game_version: &str) -> Option<&GameVersion> {
+        self.resource_target_profile
+            .as_deref()
+            .and_then(|profile| {
+                self.versions
+                    .iter()
+                    .find(|version| version.version == profile)
+            })
+            .filter(|version| version.game_version == game_version)
+            .or_else(|| (self.version().game_version == game_version).then(|| self.version()))
+            .or_else(|| {
+                self.versions
+                    .iter()
+                    .find(|version| version.game_version == game_version && version.launchable)
+            })
+            .or_else(|| {
+                self.versions
+                    .iter()
+                    .find(|version| version.game_version == game_version)
+            })
+    }
+
     fn resource_loader(&self) -> Option<String> {
-        let version = self.version();
+        let version = self.resource_target_version(&self.resource_version_filter)?;
         matches!(
             self.download_resource_category,
             Some(ResourceCategory::Mod | ResourceCategory::Modpack)
         )
         .then(|| version.loader_family.to_lowercase())
         .filter(|loader| loader != "原版")
+    }
+
+    fn resource_default_directory(
+        &self,
+        category: ResourceCategory,
+        game_version: &str,
+    ) -> Option<PathBuf> {
+        if let Some(cached) = self.resource_download_directories.get(&category) {
+            return Some(cached.clone());
+        }
+        let base = self.settings.game_directory.as_ref()?;
+        let data_directory = if !self.settings.version_isolation {
+            base.clone()
+        } else {
+            let profile = self
+                .resource_target_version(game_version)
+                .map(|version| version.version.as_str())
+                .unwrap_or(game_version);
+            base.join("versions").join(profile)
+        };
+        Some(data_directory.join(category.target_folder()))
+    }
+
+    fn open_resource_download(
+        &mut self,
+        ctx: &egui::Context,
+        category: ResourceCategory,
+        game_version: String,
+        target_profile: String,
+    ) {
+        let version_changed = self.resource_version_filter != game_version;
+        self.resource_target_profile = Some(target_profile);
+        if version_changed {
+            self.resource_version_filter = game_version;
+            self.resource_search_receiver = None;
+            self.resource_results.clear();
+        }
+        let category_changed = self.download_resource_category != Some(category);
+        if category_changed {
+            self.apply_download_category_switch(Some(category));
+        }
+        self.switch_nav_page(2, Page::Download);
+        self.download_search.clear();
+        if !category_changed && version_changed {
+            self.start_resource_search();
+        }
+        ctx.request_repaint();
     }
 
     fn begin_download_category_switch(
@@ -2299,7 +2521,7 @@ impl LauncherApp {
             self.download_switch_queued = None;
             return;
         }
-        if !self.settings.animations {
+        if !self.settings.animations_enabled() {
             self.download_switch_queued = None;
             self.apply_download_category_switch(category);
             return;
@@ -2532,7 +2754,7 @@ impl LauncherApp {
         self.favorite_editor_target = self.favorite_editor_source;
         self.favorite_editor_pending_site = None;
         self.favorite_editor_error = None;
-        if !self.settings.animations {
+        if !self.settings.animations_enabled() {
             self.finish_favorite_editor();
         }
     }
@@ -2575,7 +2797,7 @@ impl LauncherApp {
             icon_source,
         });
         self.favorite_editor_error = None;
-        if !self.settings.animations {
+        if !self.settings.animations_enabled() {
             self.finish_favorite_editor();
         }
     }
@@ -2602,7 +2824,7 @@ impl LauncherApp {
 
     fn update_favorite_editor_animation(&mut self, ctx: &egui::Context) {
         let target = if self.favorite_editor_open { 1.0 } else { 0.0 };
-        if !self.settings.animations {
+        if !self.settings.animations_enabled() {
             self.favorite_editor_value = target;
             self.favorite_editor_velocity = 0.0;
             if !self.favorite_editor_open {
@@ -2633,7 +2855,7 @@ impl LauncherApp {
         if self.settings_section == section {
             return;
         }
-        if self.settings.animations {
+        if self.settings.animations_enabled() {
             self.previous_settings_section = Some(self.settings_section);
             self.settings_transition_progress = 0.0;
             self.settings_transition_velocity = 0.0;
@@ -2655,7 +2877,7 @@ impl LauncherApp {
         if self.create_tab == index {
             return;
         }
-        if self.settings.animations {
+        if self.settings.animations_enabled() {
             self.previous_create_tab = Some(self.create_tab);
             self.create_transition_progress = 0.0;
             self.create_transition_velocity = 0.0;
@@ -2671,7 +2893,7 @@ impl LauncherApp {
     }
 
     fn update_create_animation(&mut self, ctx: &egui::Context) {
-        if !self.settings.animations {
+        if !self.settings.animations_enabled() {
             self.previous_create_tab = None;
             self.create_transition_progress = 1.0;
             self.create_transition_velocity = 0.0;
@@ -2710,7 +2932,7 @@ impl LauncherApp {
         if self.version_page_selected == index {
             return;
         }
-        if self.settings.animations {
+        if self.settings.animations_enabled() {
             self.previous_version_detail = Some(self.version_page_selected);
             self.version_detail_progress = 0.0;
             self.version_detail_velocity = 0.0;
@@ -2749,7 +2971,7 @@ impl LauncherApp {
         if let Some(version) = self.official_versions.get(index) {
             self.loader_base_version = version.id.clone();
         }
-        if self.settings.animations {
+        if self.settings.animations_enabled() {
             self.previous_download_detail = Some(self.official_selected);
             self.download_detail_progress = 0.0;
             self.download_detail_velocity = 0.0;
@@ -2767,7 +2989,7 @@ impl LauncherApp {
         if self.resource_selected == index {
             return;
         }
-        if self.settings.animations {
+        if self.settings.animations_enabled() {
             self.previous_resource_detail = Some(self.resource_selected);
             self.resource_detail_progress = 0.0;
             self.resource_detail_velocity = 0.0;
@@ -2795,7 +3017,20 @@ impl LauncherApp {
     }
 
     fn switch_nav_page(&mut self, index: usize, page: Page) {
-        if self.settings.animations && self.nav_selected != index {
+        self.set_nav_page(index, page, true);
+    }
+
+    fn set_nav_page(&mut self, index: usize, page: Page, record_history: bool) {
+        if record_history
+            && page != self.page
+            && self.page_history.last().copied() != Some(self.page)
+        {
+            self.page_history.push(self.page);
+            if self.page_history.len() > 32 {
+                self.page_history.remove(0);
+            }
+        }
+        if self.settings.animations_enabled() && self.nav_selected != index {
             self.previous_page = Some(self.page);
             self.page_transition_progress = 0.0;
             self.page_transition_velocity = 0.0;
@@ -2833,6 +3068,22 @@ impl LauncherApp {
         self.java_picker_target = None;
         self.nav_selected = index;
         self.page = page;
+    }
+
+    fn go_back_page(&mut self) -> bool {
+        let Some(page) = self.page_history.pop() else {
+            return false;
+        };
+        let index = match page {
+            Page::Home => 0,
+            Page::Versions => 1,
+            Page::Download => 2,
+            Page::Community => 3,
+            Page::Create => 4,
+            Page::Settings => 5,
+        };
+        self.set_nav_page(index, page, false);
+        true
     }
 
     fn record_version_play(&mut self, version: &str) {
@@ -3438,6 +3689,7 @@ impl LauncherApp {
         self.poll_resource_tasks();
         self.poll_favorite_icons(ctx);
         self.update_popup_animation(ctx);
+        self.update_account_name_dialog_animation(ctx);
         self.update_favorite_editor_animation(ctx);
         self.update_navigation_animation(ctx);
         self.poll_download_category_switch(ctx);
@@ -3479,7 +3731,7 @@ impl LauncherApp {
             self.toast = None;
         }
 
-        let animate = self.settings.animations
+        let animate = self.settings.animations_enabled()
             && (self.launch_started.is_some()
                 || self.toast.is_some()
                 || self.news.is_some()
@@ -3506,7 +3758,10 @@ impl LauncherApp {
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            if self.java_picker_target.is_some() {
+            if self.account_name_dialog_open {
+                self.account_name_dialog_open = false;
+                self.account_name_error = None;
+            } else if self.java_picker_target.is_some() {
                 self.java_picker_target = None;
             } else if self.version_export_open {
                 self.version_export_open = false;
@@ -3525,6 +3780,7 @@ impl LauncherApp {
                 self.loader_versions_receiver = None;
             } else if self.favorite_editor_open {
                 self.cancel_favorite_editor();
+            } else if self.go_back_page() {
             } else if self.page != Page::Home {
                 self.switch_nav_page(0, Page::Home);
             } else {
@@ -3578,6 +3834,12 @@ impl LauncherApp {
         }
         let resume_recent = !self.launch_without_recent;
         let data_directory = self.version_data_directory();
+        if self.settings.player_skin.is_some()
+            && let Some(directory) = data_directory.as_deref()
+            && let Err(error) = install_local_skin_resource_pack(directory, &self.skin_pixels)
+        {
+            self.show_toast(format!("本地皮肤资源包安装失败：{error}"));
+        }
         let memory_mb = self
             .settings
             .version_memory_mb(&game_directory, &version.version)
@@ -3605,6 +3867,7 @@ impl LauncherApp {
             },
             data_directory,
             java_path,
+            player_name: self.settings.player_name.clone(),
         };
         match crate::game::launch(
             &game_directory,
@@ -3702,6 +3965,13 @@ impl LauncherApp {
             ctx.request_repaint_after(Duration::from_millis(50));
             return;
         }
+        if self.account_name_dialog_open
+            && self.account_name_dialog_value < 0.98
+            && self.started_at.elapsed() < Duration::from_secs(2)
+        {
+            ctx.request_repaint_after(Duration::from_millis(16));
+            return;
+        }
         if self.page == Page::Community
             && self.favorite_icon_receiver.is_some()
             && self.started_at.elapsed() < Duration::from_secs(8)
@@ -3792,20 +4062,25 @@ impl LauncherApp {
 
     fn render(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, screen: Rect) {
         theme::configure_effects(
+            ctx,
             self.settings.glass_transparency,
             self.settings.pointer_brightness,
             self.settings.pointer_radius,
-            self.settings.liquid_glass,
-            self.settings.liquid_glass_mode == LiquidGlassMode::Clear,
+            self.settings.appearance_mode,
         );
-        let time = if self.screenshot_requested || !self.settings.animations {
+        ANIMATION_STRENGTH.store(
+            (self.settings.animation_level.strength() * 100.0).round() as u16,
+            Ordering::Relaxed,
+        );
+        let animation_strength = animation_strength();
+        let time = if self.screenshot_requested || !self.settings.animations_enabled() {
             2.2
         } else {
-            self.started_at.elapsed().as_secs_f64()
+            self.started_at.elapsed().as_secs_f64() * animation_strength as f64
         };
         let painter = ui.painter().clone();
         if self.forced_update_release.is_some() {
-            painter.rect_filled(screen, 0, theme::BG);
+            painter.rect_filled(screen, 0, theme::background());
             paint_ambient_background(&painter, screen, time);
             self.paint_forced_update(ctx, ui, screen, time);
             return;
@@ -3823,7 +4098,7 @@ impl LauncherApp {
             .layout_no_wrap(
                 version_label.clone(),
                 theme::bold_font(10.5),
-                theme::INK_SOFT,
+                theme::ink_soft(),
             )
             .size()
             .x;
@@ -3839,7 +4114,7 @@ impl LauncherApp {
         );
         self.handle_outside_click(ctx, &layout);
 
-        painter.rect_filled(screen, 0, theme::BG);
+        painter.rect_filled(screen, 0, theme::background());
         paint_ambient_background(&painter, screen, time);
         self.paint_pointer_light(ctx, &painter, screen);
         self.handle_window_frame(ctx, ui, &layout);
@@ -3927,6 +4202,7 @@ impl LauncherApp {
         }
         self.paint_install_progress(&painter, screen, time);
         self.paint_modpack_import_progress(&painter, screen, time);
+        self.paint_account_name_dialog(ctx, screen, time);
         self.paint_toast(&painter, screen);
         if self.pointer_glow_strength > 0.01 {
             theme::pointer_glow_overlay(
@@ -4001,12 +4277,21 @@ impl LauncherApp {
         layout: &Layout,
         time: f64,
     ) {
-        theme::vertical_gradient(
-            painter,
-            layout.titlebar,
-            Color32::from_rgba_unmultiplied(12, 18, 14, 248),
-            Color32::from_rgba_unmultiplied(9, 14, 11, 226),
-        );
+        if theme::appearance_mode() == theme::AppearanceMode::Simple {
+            theme::vertical_gradient(
+                painter,
+                layout.titlebar,
+                Color32::from_rgb(255, 255, 255),
+                Color32::from_rgb(244, 246, 242),
+            );
+        } else {
+            theme::vertical_gradient(
+                painter,
+                layout.titlebar,
+                Color32::from_rgba_unmultiplied(12, 18, 14, 248),
+                Color32::from_rgba_unmultiplied(9, 14, 11, 226),
+            );
+        }
         theme::soft_orb(
             painter,
             Pos2::new(
@@ -4100,7 +4385,7 @@ impl LauncherApp {
                 "准备就绪"
             },
             9.2,
-            theme::MUTED,
+            theme::muted(),
         );
 
         let button_size = Vec2::new(45.0, TITLEBAR_HEIGHT);
@@ -4135,7 +4420,11 @@ impl LauncherApp {
                 painter,
                 rect.center(),
                 action,
-                if hovered { theme::INK } else { theme::MUTED },
+                if hovered {
+                    theme::ink()
+                } else {
+                    theme::muted()
+                },
             );
             if response.clicked() {
                 match action {
@@ -4162,12 +4451,21 @@ impl LauncherApp {
         time: f64,
     ) {
         let mut hovered_tooltip: Option<NavTooltip> = None;
-        theme::vertical_gradient(
-            painter,
-            layout.rail,
-            Color32::from_rgba_unmultiplied(16, 25, 19, 238),
-            Color32::from_rgba_unmultiplied(10, 16, 12, 232),
-        );
+        if theme::appearance_mode() == theme::AppearanceMode::Simple {
+            theme::vertical_gradient(
+                painter,
+                layout.rail,
+                Color32::from_rgb(252, 253, 251),
+                Color32::from_rgb(240, 242, 238),
+            );
+        } else {
+            theme::vertical_gradient(
+                painter,
+                layout.rail,
+                Color32::from_rgba_unmultiplied(16, 25, 19, 238),
+                Color32::from_rgba_unmultiplied(10, 16, 12, 232),
+            );
+        }
         theme::soft_orb(
             painter,
             Pos2::new(layout.rail.center().x, TITLEBAR_HEIGHT + 200.0),
@@ -4227,7 +4525,7 @@ impl LauncherApp {
         } else {
             settings_rect.center().y
         };
-        if !self.nav_highlight_initialized || !self.settings.animations {
+        if !self.nav_highlight_initialized || !self.settings.animations_enabled() {
             self.nav_highlight_y = target_y;
             self.nav_highlight_velocity = 0.0;
             self.nav_highlight_initialized = true;
@@ -4277,7 +4575,7 @@ impl LauncherApp {
                 if active {
                     Color32::from_rgb(215, 255, 203)
                 } else if response.hovered() {
-                    theme::INK_SOFT
+                    theme::ink_soft()
                 } else {
                     Color32::from_rgb(113, 128, 119)
                 },
@@ -4305,6 +4603,7 @@ impl LauncherApp {
                             (self.selected_version as f32 * 64.0 - 180.0).max(0.0);
                     }
                     2 => {
+                        self.resource_target_profile = None;
                         self.switch_nav_page(2, Page::Download);
                         self.refresh_official_manifest();
                     }
@@ -4332,9 +4631,9 @@ impl LauncherApp {
             if settings_active {
                 Color32::from_rgb(215, 255, 203)
             } else if settings.hovered() {
-                theme::INK_SOFT
+                theme::ink_soft()
             } else {
-                theme::MUTED
+                theme::muted()
             },
         );
         if settings.clicked() {
@@ -4389,6 +4688,8 @@ impl LauncherApp {
             if self.menu == Menu::Profile {
                 self.menu = Menu::None;
             } else {
+                self.version_popup_value = 0.0;
+                self.version_popup_velocity = 0.0;
                 self.menu = Menu::Profile;
             }
         }
@@ -4439,7 +4740,7 @@ impl LauncherApp {
                         rect.center(),
                         self.nav_tooltip_label,
                         8.0,
-                        theme::INK_SOFT,
+                        theme::ink_soft(),
                         true,
                     );
                 }
@@ -4600,7 +4901,7 @@ impl LauncherApp {
             Pos2::new(badge.right() + 10.0, trigger.top() + 7.0),
             "当前版本",
             7.2,
-            theme::MUTED,
+            theme::muted(),
         );
         let version_label = self.version_selector_label(version);
         let version_label = fit_text_to_width(
@@ -4614,7 +4915,7 @@ impl LauncherApp {
             Pos2::new(badge.right() + 10.0, trigger.top() + 20.0),
             version_label,
             10.5,
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
         draw_icon(
             painter,
@@ -4623,12 +4924,14 @@ impl LauncherApp {
                 Pos2::new(trigger.right() - 17.0, trigger.center().y),
                 Vec2::splat(13.0),
             ),
-            theme::MUTED,
+            theme::muted(),
         );
         if response.as_ref().is_some_and(|response| response.clicked()) {
             let opening = self.menu != Menu::Version;
             let selectable = self.selectable_version_order();
             if opening {
+                self.profile_popup_value = 0.0;
+                self.profile_popup_velocity = 0.0;
                 let visible_height =
                     (version_menu_rect(layout, selectable.len()).height() - 39.0).max(1.0);
                 let content_height = selectable.len() as f32 * VERSION_ROW_HEIGHT;
@@ -4658,6 +4961,7 @@ impl LauncherApp {
         let hero = motion.rect(source_hero);
         theme::fill_round(painter, hero, theme::RADIUS, Color32::from_rgb(14, 24, 19));
         let world_rect = hero.shrink(8.0);
+        let simple = theme::appearance_mode() == theme::AppearanceMode::Simple;
         if let Some(background) = self.hero_background_texture.clone() {
             paint_rounded_image(
                 painter,
@@ -4667,35 +4971,68 @@ impl LauncherApp {
                 background.size(),
             );
             let image_layer = painter.clone();
-            theme::horizontal_fade(
-                &image_layer,
-                world_rect,
-                Color32::from_rgba_unmultiplied(6, 13, 9, 205),
-                Color32::from_rgba_unmultiplied(7, 15, 10, 76),
-                Color32::TRANSPARENT,
-            );
-            theme::vertical_gradient(
-                &image_layer,
-                Rect::from_min_max(
-                    Pos2::new(
-                        world_rect.left(),
-                        world_rect.bottom() - world_rect.height() * 0.38,
+            if simple {
+                theme::horizontal_fade(
+                    &image_layer,
+                    world_rect,
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 232),
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 132),
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+                );
+                theme::vertical_gradient(
+                    &image_layer,
+                    Rect::from_min_max(
+                        Pos2::new(
+                            world_rect.left(),
+                            world_rect.bottom() - world_rect.height() * 0.38,
+                        ),
+                        world_rect.right_bottom(),
                     ),
-                    world_rect.right_bottom(),
-                ),
-                Color32::TRANSPARENT,
-                Color32::from_rgba_unmultiplied(5, 11, 7, 176),
-            );
+                    Color32::TRANSPARENT,
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 166),
+                );
+            } else {
+                theme::horizontal_fade(
+                    &image_layer,
+                    world_rect,
+                    Color32::from_rgba_unmultiplied(6, 13, 9, 205),
+                    Color32::from_rgba_unmultiplied(7, 15, 10, 76),
+                    Color32::TRANSPARENT,
+                );
+                theme::vertical_gradient(
+                    &image_layer,
+                    Rect::from_min_max(
+                        Pos2::new(
+                            world_rect.left(),
+                            world_rect.bottom() - world_rect.height() * 0.38,
+                        ),
+                        world_rect.right_bottom(),
+                    ),
+                    Color32::TRANSPARENT,
+                    Color32::from_rgba_unmultiplied(5, 11, 7, 176),
+                );
+            }
         } else {
             scene::paint_world(painter, world_rect, time);
+            if simple {
+                theme::horizontal_fade(
+                    painter,
+                    world_rect,
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 218),
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 112),
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 20),
+                );
+            }
         }
-        painter.rect_stroke(
-            hero,
-            theme::RADIUS,
-            Stroke::new(8.0, Color32::from_rgb(14, 24, 19)),
-            StrokeKind::Inside,
-        );
-        theme::stroke_round(painter, hero, theme::RADIUS, 1.0, theme::LINE_STRONG);
+        if !simple {
+            painter.rect_stroke(
+                hero,
+                theme::RADIUS,
+                Stroke::new(8.0, Color32::from_rgb(14, 24, 19)),
+                StrokeKind::Inside,
+            );
+        }
+        theme::stroke_round(painter, hero, theme::RADIUS, 1.0, theme::line_strong());
         theme::horizontal_fade(
             painter,
             Rect::from_min_max(
@@ -4763,7 +5100,7 @@ impl LauncherApp {
                 (badge.width() - 93.0).max(70.0),
             ),
             8.4,
-            theme::INK,
+            theme::ink(),
         );
         let update_button = Rect::from_min_size(
             Pos2::new(badge.right() - 57.0, badge.top() + 3.0),
@@ -4805,6 +5142,7 @@ impl LauncherApp {
         if update_response.clicked() {
             self.official_filter = VersionFilter::Release;
             self.official_scroll = 0.0;
+            self.resource_target_profile = None;
             if let Some(index) = self
                 .official_versions
                 .iter()
@@ -4834,15 +5172,6 @@ impl LauncherApp {
             Color32::from_rgb(217, 245, 191),
         );
         let description_y = title_y + title_size * 2.22;
-        theme::wrapped_text(
-            painter,
-            Pos2::new(hero.left() + pad + 1.0, description_y),
-            "暮色穿过树影，熟悉的方块世界已经准备好。\n整理行囊，继续你的下一段冒险。",
-            10.2,
-            theme::alpha(Color32::from_rgb(235, 244, 230), 184),
-            (hero.width() * 0.43).max(320.0),
-        );
-
         let meta_y = description_y + 48.0;
         let version = self.version().clone();
         let data_directory = self.version_data_directory().unwrap_or_default();
@@ -5002,7 +5331,7 @@ impl LauncherApp {
                 .map(relative_play_time)
                 .unwrap_or_else(|| "尚无记录".to_owned()),
             theme::font(7.2),
-            Color32::from_rgb(185, 224, 188),
+            theme::adaptive_text_color(Color32::from_rgb(185, 224, 188)),
         );
         let title = recent
             .as_ref()
@@ -5174,7 +5503,7 @@ impl LauncherApp {
         let has_loader = !loader_text.is_empty();
         let mut loader_text_width = if has_loader {
             painter
-                .layout_no_wrap(loader_text.clone(), loader_font.clone(), theme::INK)
+                .layout_no_wrap(loader_text.clone(), loader_font.clone(), theme::ink())
                 .size()
                 .x
         } else {
@@ -5185,7 +5514,7 @@ impl LauncherApp {
             loader_text =
                 fit_text_to_width(painter, &loader_text, loader_font.clone(), max_loader_text);
             loader_text_width = painter
-                .layout_no_wrap(loader_text.clone(), loader_font, theme::INK)
+                .layout_no_wrap(loader_text.clone(), loader_font, theme::ink())
                 .size()
                 .x;
         }
@@ -5202,7 +5531,7 @@ impl LauncherApp {
             version_max_width,
         );
         let version_width = painter
-            .layout_no_wrap(version_text.clone(), theme::bold_font(14.0), theme::INK)
+            .layout_no_wrap(version_text.clone(), theme::bold_font(14.0), theme::ink())
             .size()
             .x;
         theme::bold_text(
@@ -5210,7 +5539,7 @@ impl LauncherApp {
             Pos2::new(text_left, dock.top() + 17.0),
             version_text,
             14.0,
-            theme::INK,
+            theme::ink(),
         );
         if has_loader {
             let loader_rect = Rect::from_min_size(
@@ -5237,7 +5566,7 @@ impl LauncherApp {
                     Pos2::new(loader_rect.right() + 9.0, dock.top() + 20.0),
                     "✓ 已校验",
                     7.2,
-                    theme::MUTED,
+                    theme::muted(),
                 );
             }
         }
@@ -5263,7 +5592,7 @@ impl LauncherApp {
             painter.circle_filled(
                 Pos2::new(more.center().x + offset, more.center().y),
                 1.5,
-                theme::MUTED,
+                theme::muted(),
             );
         }
         if more_response.clicked() {
@@ -5559,7 +5888,7 @@ impl LauncherApp {
             Pos2::new(dialog.left() + 24.0, dialog.top() + 20.0),
             "安装加载器",
             21.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             painter,
@@ -5576,7 +5905,7 @@ impl LauncherApp {
                 )
             },
             8.2,
-            theme::MUTED,
+            theme::muted(),
         );
 
         let installing = self.loader_install_receiver.is_some();
@@ -5627,7 +5956,7 @@ impl LauncherApp {
                 if selected {
                     theme::GREEN_BRIGHT
                 } else {
-                    theme::INK_SOFT
+                    theme::ink_soft()
                 },
                 selected,
             );
@@ -5655,7 +5984,7 @@ impl LauncherApp {
                 Pos2::new(list_clip.center().x, list_clip.top() + 70.0),
                 &update.stage,
                 13.0,
-                theme::INK,
+                theme::ink(),
                 true,
             );
             if update.finished && !update.success {
@@ -5686,7 +6015,7 @@ impl LauncherApp {
                 Pos2::new(list_clip.center().x, list_clip.top() + 74.0),
                 "选择上方加载器以查看可用版本",
                 9.3,
-                theme::MUTED,
+                theme::muted(),
                 false,
             );
         } else if self.loader_versions_receiver.is_some() {
@@ -5695,7 +6024,7 @@ impl LauncherApp {
                 Pos2::new(list_clip.center().x, list_clip.top() + 74.0),
                 "正在获取加载器版本…",
                 9.3,
-                theme::MUTED,
+                theme::muted(),
                 false,
             );
         } else if let Some(error) = &self.loader_versions_error {
@@ -5754,7 +6083,7 @@ impl LauncherApp {
                     if selected {
                         theme::GREEN_BRIGHT
                     } else {
-                        theme::INK_SOFT
+                        theme::ink_soft()
                     },
                 );
                 if response.clicked() {
@@ -5836,7 +6165,7 @@ impl LauncherApp {
             Pos2::new(layout.content_left, layout.latest.top() + heading_shift),
             "DISCOVER",
             7.2,
-            theme::MUTED,
+            theme::muted(),
         );
         theme::bold_text(
             painter,
@@ -5846,7 +6175,7 @@ impl LauncherApp {
             ),
             "最新动态",
             15.0,
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
         let all_news = Rect::from_min_size(
             Pos2::new(
@@ -5866,7 +6195,7 @@ impl LauncherApp {
             if all_response.hovered() {
                 Color32::from_rgb(188, 224, 183)
             } else {
-                theme::MUTED
+                theme::muted()
             },
         );
         if all_response.clicked() {
@@ -5963,7 +6292,7 @@ impl LauncherApp {
                 Pos2::new(copy_x, rect.top() + 31.0),
                 &title,
                 11.3,
-                theme::INK_SOFT,
+                theme::ink_soft(),
             );
             theme::wrapped_text(
                 painter,
@@ -6039,7 +6368,7 @@ impl LauncherApp {
             Pos2::new(list_heading.left() + 22.0, list_heading.top() + 15.0),
             "已安装版本",
             19.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             painter,
@@ -6049,7 +6378,7 @@ impl LauncherApp {
                 42,
             ),
             8.5,
-            theme::MUTED,
+            theme::muted(),
         );
         let refresh = Rect::from_min_size(
             Pos2::new(list_heading.right() - 91.0, list_heading.top() + 14.0),
@@ -6137,7 +6466,7 @@ impl LauncherApp {
             Pos2::new(folder_selector.left() + 29.0, folder_selector.top() + 9.0),
             folder_text,
             8.2,
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
         draw_icon(
             painter,
@@ -6146,7 +6475,7 @@ impl LauncherApp {
                 Pos2::new(folder_selector.right() - 17.0, folder_selector.center().y),
                 Vec2::splat(12.0),
             ),
-            theme::MUTED,
+            theme::muted(),
         );
         if folder_response.clicked() {
             self.menu = Menu::None;
@@ -6190,7 +6519,11 @@ impl LauncherApp {
                 button.center(),
                 label,
                 8.4,
-                if selected { theme::INK } else { theme::MUTED },
+                if selected {
+                    theme::ink()
+                } else {
+                    theme::muted()
+                },
                 selected,
             );
             if response.clicked() {
@@ -6346,9 +6679,9 @@ impl LauncherApp {
                 row_label,
                 11.0,
                 if version.launchable {
-                    theme::INK
+                    theme::ink()
                 } else {
-                    theme::INK_SOFT
+                    theme::ink_soft()
                 },
             );
             theme::text(
@@ -6356,7 +6689,7 @@ impl LauncherApp {
                 Pos2::new(row.left() + 48.0, row.top() + 33.0),
                 ellipsize_end(&row_detail, 42),
                 8.0,
-                theme::MUTED,
+                theme::muted(),
             );
             let status = if version.launchable {
                 "可启动"
@@ -6400,7 +6733,7 @@ impl LauncherApp {
                 Pos2::new(list_panel.center().x, list_top + 60.0),
                 "当前分类没有版本",
                 9.0,
-                theme::MUTED,
+                theme::muted(),
                 false,
             );
         }
@@ -6492,7 +6825,7 @@ impl LauncherApp {
                     Pos2::new(rect.left() + 16.0, rect.top() + 11.0),
                     "选择 Minecraft 文件夹",
                     9.2,
-                    theme::INK,
+                    theme::ink(),
                 );
                 let directories = self.settings.game_directories.clone();
                 let visible = directories.len().min(5);
@@ -6554,7 +6887,7 @@ impl LauncherApp {
                         if selected {
                             theme::GREEN_BRIGHT
                         } else {
-                            theme::MUTED
+                            theme::muted()
                         },
                     );
                     theme::text(
@@ -6563,9 +6896,9 @@ impl LauncherApp {
                         ellipsize_start(&directory.display().to_string(), 48),
                         7.9,
                         if selected {
-                            theme::INK
+                            theme::ink()
                         } else {
-                            theme::INK_SOFT
+                            theme::ink_soft()
                         },
                     );
                     if selected {
@@ -6731,9 +7064,9 @@ impl LauncherApp {
                 let icon = match kind {
                     VersionContentKind::Mods => NavIcon::Box,
                     VersionContentKind::Saves => NavIcon::Folder,
-                    VersionContentKind::ShaderPacks | VersionContentKind::ResourcePacks => {
-                        NavIcon::Sparkles
-                    }
+                    VersionContentKind::ShaderPacks
+                    | VersionContentKind::ResourcePacks
+                    | VersionContentKind::Datapacks => NavIcon::Sparkles,
                     VersionContentKind::Export => NavIcon::Layers,
                 };
                 draw_icon(
@@ -6750,7 +7083,7 @@ impl LauncherApp {
                     Pos2::new(dialog.left() + 52.0, dialog.top() + 17.0),
                     kind.label(),
                     15.0,
-                    theme::INK,
+                    theme::ink(),
                 );
                 theme::text(
                     &painter,
@@ -6770,7 +7103,7 @@ impl LauncherApp {
                         )
                     },
                     7.8,
-                    theme::MUTED,
+                    theme::muted(),
                 );
                 let close = version_content_close_rect(dialog);
                 let close_response = ui
@@ -6790,7 +7123,7 @@ impl LauncherApp {
                     &painter,
                     NavIcon::Close,
                     close.shrink(10.0),
-                    theme::INK_SOFT,
+                    theme::ink_soft(),
                 );
                 if close_response.clicked() {
                     self.close_version_content_dialog();
@@ -6828,7 +7161,7 @@ impl LauncherApp {
                         list.center(),
                         format!("这里还没有{}", kind.label()),
                         9.0,
-                        theme::MUTED,
+                        theme::muted(),
                         false,
                     );
                 }
@@ -6880,14 +7213,14 @@ impl LauncherApp {
                         Pos2::new(card.left() + 44.0, card.top() + 15.0),
                         ellipsize_end(&entry.name, 38),
                         9.2,
-                        theme::INK_SOFT,
+                        theme::ink_soft(),
                     );
                     theme::text(
                         &list_painter,
                         Pos2::new(card.left() + 44.0, card.top() + 39.0),
                         ellipsize_end(&entry.detail, 42),
                         7.6,
-                        theme::MUTED,
+                        theme::muted(),
                     );
                 }
             });
@@ -6922,7 +7255,7 @@ impl LauncherApp {
                     Pos2::new(rect.left() + 16.0, rect.top() + 10.0),
                     "选择 Java 运行时",
                     9.2,
-                    theme::INK,
+                    theme::ink(),
                 );
                 let list_top = rect.top() + 34.0;
                 let list_height = visible as f32 * 42.0;
@@ -6976,7 +7309,7 @@ impl LauncherApp {
                         JavaPickerTarget::Version { .. } => "跟随全局 Java 设置",
                     },
                     8.6,
-                    theme::INK_SOFT,
+                    theme::ink_soft(),
                 );
                 theme::text(
                     &list_painter,
@@ -6987,7 +7320,7 @@ impl LauncherApp {
                         "由启动器根据版本要求选择"
                     },
                     7.2,
-                    theme::MUTED,
+                    theme::muted(),
                 );
                 if automatic_response.clicked() {
                     match &target {
@@ -7041,14 +7374,14 @@ impl LauncherApp {
                         Pos2::new(row.left() + 12.0, row.top() + 5.0),
                         format!("Java {}", runtime.major),
                         8.6,
-                        theme::INK_SOFT,
+                        theme::ink_soft(),
                     );
                     theme::text(
                         &list_painter,
                         Pos2::new(row.left() + 12.0, row.top() + 21.0),
                         ellipsize_start(&runtime.path.display().to_string(), 48),
                         7.1,
-                        theme::MUTED,
+                        theme::muted(),
                     );
                     if response.clicked() {
                         match &target {
@@ -7219,7 +7552,7 @@ impl LauncherApp {
                     Pos2::new(dialog.left() + 22.0, dialog.top() + 17.0),
                     "导出整合包",
                     17.0,
-                    theme::INK,
+                    theme::ink(),
                 );
                 theme::text(
                     &painter,
@@ -7229,7 +7562,7 @@ impl LauncherApp {
                         self.version_selector_label(&version)
                     ),
                     8.1,
-                    theme::MUTED,
+                    theme::muted(),
                 );
                 let close = Rect::from_min_size(
                     Pos2::new(dialog.right() - 44.0, dialog.top() + 16.0),
@@ -7248,7 +7581,12 @@ impl LauncherApp {
                         theme::black_alpha(60)
                     },
                 );
-                draw_icon(&painter, NavIcon::Close, close.shrink(8.0), theme::INK_SOFT);
+                draw_icon(
+                    &painter,
+                    NavIcon::Close,
+                    close.shrink(8.0),
+                    theme::ink_soft(),
+                );
                 if close_response.clicked() {
                     self.version_export_open = false;
                 }
@@ -7393,7 +7731,7 @@ impl LauncherApp {
         let detail_heading_content = card_clip(painter, detail_heading);
         let painter = &detail_heading_content;
         let heading = Pos2::new(detail_heading.left() + 22.0, detail_heading.top() + 12.0);
-        theme::text(painter, heading, "版本详情", 8.0, theme::MUTED);
+        theme::text(painter, heading, "版本详情", 8.0, theme::muted());
         let detail_title = self.version_selector_label(&selected);
         let detail_title = fit_text_to_width(
             painter,
@@ -7406,7 +7744,7 @@ impl LauncherApp {
             heading + Vec2::new(0.0, 18.0),
             detail_title,
             20.0,
-            theme::INK,
+            theme::ink(),
         );
         let content_width = (source_detail_panel.width() - 52.0).max(1.0);
         let summary = motion.rect(Rect::from_min_size(
@@ -7447,28 +7785,28 @@ impl LauncherApp {
             Pos2::new(info_x, summary.top() + 20.0),
             "加载器",
             7.9,
-            theme::MUTED,
+            theme::muted(),
         );
         theme::bold_text(
             painter,
             Pos2::new(info_x, summary.top() + 35.0),
             ellipsize_end(&selected.loader, 30),
             11.0,
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
         theme::text(
             painter,
             Pos2::new(info_x, summary.top() + 64.0),
             "Java 要求",
             7.9,
-            theme::MUTED,
+            theme::muted(),
         );
         theme::text(
             painter,
             Pos2::new(info_x, summary.top() + 79.0),
             &selected.java,
             9.5,
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
         theme::text(
             painter,
@@ -7510,7 +7848,7 @@ impl LauncherApp {
             Pos2::new(memory_card.left() + 18.0, memory_card.top() + 13.0),
             "内存分配",
             10.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             painter,
@@ -7521,7 +7859,7 @@ impl LauncherApp {
                 "当前跟随全局设置"
             },
             7.8,
-            theme::MUTED,
+            theme::muted(),
         );
         let memory_control_center = Pos2::new(memory_card.right() - 135.0, memory_card.center().y);
         theme::center_text(
@@ -7529,7 +7867,7 @@ impl LauncherApp {
             memory_control_center,
             format!("{:.1} GB", memory as f32 / 1024.0),
             13.0,
-            theme::INK,
+            theme::ink(),
             true,
         );
         if view.active {
@@ -7604,7 +7942,7 @@ impl LauncherApp {
             Pos2::new(java_card.left() + 18.0, java_card.top() + 13.0),
             "Java 运行时",
             10.0,
-            theme::INK,
+            theme::ink(),
         );
         let java_description = match effective_java.as_ref() {
             Some(path) => {
@@ -7622,7 +7960,7 @@ impl LauncherApp {
             Pos2::new(java_card.left() + 18.0, java_card.top() + 37.0),
             ellipsize_end(&java_description, 58),
             7.8,
-            theme::MUTED,
+            theme::muted(),
         );
         if view.active {
             let select = Rect::from_min_size(
@@ -7669,6 +8007,12 @@ impl LauncherApp {
                 count_content_packs(&data_directory.join("resourcepacks")),
                 NavIcon::Sparkles,
             ),
+            (
+                "datapacks",
+                "数据包",
+                count_content_packs(&data_directory.join("datapacks")),
+                NavIcon::Sparkles,
+            ),
             ("export", "导出", 0, NavIcon::Layers),
         ];
         for (index, (folder, label, count, icon)) in controls.into_iter().enumerate() {
@@ -7677,6 +8021,7 @@ impl LauncherApp {
                 "saves" => Some(VersionContentKind::Saves),
                 "shaderpacks" => Some(VersionContentKind::ShaderPacks),
                 "resourcepacks" => Some(VersionContentKind::ResourcePacks),
+                "datapacks" => Some(VersionContentKind::Datapacks),
                 "export" => Some(VersionContentKind::Export),
                 _ => None,
             };
@@ -7735,7 +8080,7 @@ impl LauncherApp {
                 Pos2::new(card.left() + 48.0, card.top() + 17.0),
                 label,
                 10.0,
-                theme::INK_SOFT,
+                theme::ink_soft(),
             );
             theme::text(
                 painter,
@@ -7745,19 +8090,60 @@ impl LauncherApp {
                     "saves" => format!("{count} 个存档"),
                     "shaderpacks" => format!("{count} 个光影包"),
                     "resourcepacks" => format!("{count} 个材质包"),
+                    "datapacks" => format!("{count} 个数据包"),
                     _ => "导出整合包".to_owned(),
                 },
                 8.0,
-                theme::MUTED,
+                theme::muted(),
             );
-            theme::text(
-                painter,
-                Pos2::new(card.right() - 17.0, card.top() + 17.0),
-                "→",
-                9.0,
-                theme::MUTED,
-            );
-            if response.as_ref().is_some_and(|response| response.clicked())
+            let download_category = match folder {
+                "mods" => Some(ResourceCategory::Mod),
+                "shaderpacks" => Some(ResourceCategory::Shader),
+                "resourcepacks" => Some(ResourceCategory::ResourcePack),
+                "datapacks" => Some(ResourceCategory::Datapack),
+                _ => None,
+            };
+            let download_clicked = if let Some(category) = download_category {
+                let button = Rect::from_min_size(
+                    Pos2::new(card.right() - 72.0, card.top() + 49.0),
+                    Vec2::new(56.0, 25.0),
+                );
+                view.active
+                    && settings_button(
+                        ui,
+                        painter,
+                        button,
+                        match category {
+                            ResourceCategory::Mod => "version-download-mods",
+                            ResourceCategory::Shader => "version-download-shaders",
+                            ResourceCategory::ResourcePack => "version-download-resourcepacks",
+                            ResourceCategory::Datapack => "version-download-datapacks",
+                            ResourceCategory::Modpack => "version-download-modpacks",
+                        },
+                        "下载",
+                        false,
+                    )
+                    && {
+                        self.open_resource_download(
+                            ui.ctx(),
+                            category,
+                            selected.game_version.clone(),
+                            selected.version.clone(),
+                        );
+                        true
+                    }
+            } else {
+                theme::text(
+                    painter,
+                    Pos2::new(card.right() - 17.0, card.top() + 17.0),
+                    "→",
+                    9.0,
+                    theme::muted(),
+                );
+                false
+            };
+            if !download_clicked
+                && response.as_ref().is_some_and(|response| response.clicked())
                 && view.active
                 && let Some(kind) = content_kind
             {
@@ -7899,7 +8285,11 @@ impl LauncherApp {
                 tab.center(),
                 label,
                 8.3,
-                if selected { theme::INK } else { theme::MUTED },
+                if selected {
+                    theme::ink()
+                } else {
+                    theme::muted()
+                },
                 selected,
             );
             if response.clicked() && !selected {
@@ -7974,7 +8364,7 @@ impl LauncherApp {
             Pos2::new(list_heading.left() + 22.0, list_heading.top() + 15.0),
             "下载游戏版本",
             19.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             painter,
@@ -7990,7 +8380,7 @@ impl LauncherApp {
                 )
             },
             8.4,
-            theme::MUTED,
+            theme::muted(),
         );
         let refresh = Rect::from_min_size(
             Pos2::new(list_heading.right() - 91.0, list_heading.top() + 14.0),
@@ -8020,7 +8410,7 @@ impl LauncherApp {
                 Pos2::new(search.left() + 17.0, search.center().y),
                 Vec2::splat(13.0),
             ),
-            theme::MUTED,
+            theme::muted(),
         );
         let _ = ui.put(
             Rect::from_min_max(
@@ -8030,7 +8420,7 @@ impl LauncherApp {
             egui::TextEdit::singleline(&mut self.download_search)
                 .frame(egui::Frame::NONE)
                 .font(theme::font(8.8))
-                .text_color(theme::INK)
+                .text_color(theme::ink())
                 .hint_text("搜索 Minecraft 版本号"),
         );
 
@@ -8070,7 +8460,11 @@ impl LauncherApp {
                 button.center(),
                 label,
                 8.4,
-                if selected { theme::INK } else { theme::MUTED },
+                if selected {
+                    theme::ink()
+                } else {
+                    theme::muted()
+                },
                 selected,
             );
             if response.clicked() {
@@ -8193,14 +8587,14 @@ impl LauncherApp {
                 Pos2::new(row.left() + 42.0, row.top() + 9.0),
                 &version.id,
                 10.3,
-                theme::INK_SOFT,
+                theme::ink_soft(),
             );
             theme::text(
                 &row_painter,
                 Pos2::new(row.left() + 42.0, row.top() + 29.0),
                 download_version_kind(&version.kind),
                 7.6,
-                theme::MUTED,
+                theme::muted(),
             );
             if response.clicked() {
                 self.switch_download_detail(*global_index);
@@ -8220,7 +8614,7 @@ impl LauncherApp {
                     "当前分类没有可下载版本"
                 },
                 9.0,
-                theme::MUTED,
+                theme::muted(),
                 false,
             );
         }
@@ -8355,7 +8749,7 @@ impl LauncherApp {
                 version_filter_button.width() - 34.0,
             ),
             8.0,
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
         draw_icon(
             painter,
@@ -8367,7 +8761,7 @@ impl LauncherApp {
                 ),
                 Vec2::splat(12.0),
             ),
-            theme::MUTED,
+            theme::muted(),
         );
         if version_filter_response.clicked() {
             self.resource_version_menu_open = !self.resource_version_menu_open;
@@ -8384,7 +8778,7 @@ impl LauncherApp {
                 heading.width() - 200.0,
             ),
             18.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             painter,
@@ -8408,7 +8802,7 @@ impl LauncherApp {
                 }
             ),
             8.1,
-            theme::MUTED,
+            theme::muted(),
         );
         let search = Rect::from_min_size(
             Pos2::new(heading.left() + 20.0, heading.top() + 61.0),
@@ -8428,7 +8822,7 @@ impl LauncherApp {
                 Pos2::new(search.left() + 16.0, search.center().y),
                 Vec2::splat(13.0),
             ),
-            theme::MUTED,
+            theme::muted(),
         );
         let search_response = ui.put(
             Rect::from_min_max(
@@ -8438,7 +8832,7 @@ impl LauncherApp {
             egui::TextEdit::singleline(&mut self.download_search)
                 .frame(egui::Frame::NONE)
                 .font(theme::font(8.8))
-                .text_color(theme::INK)
+                .text_color(theme::ink())
                 .hint_text(format!("搜索{}", category.label())),
         );
         let search_button = Rect::from_min_size(
@@ -8517,7 +8911,7 @@ impl LauncherApp {
                     row.width() - 126.0,
                 ),
                 10.0,
-                theme::INK_SOFT,
+                theme::ink_soft(),
             );
             theme::text(
                 &row_painter,
@@ -8529,7 +8923,7 @@ impl LauncherApp {
                     row.width() - 32.0,
                 ),
                 7.5,
-                theme::MUTED,
+                theme::muted(),
             );
             theme::text(
                 &row_painter,
@@ -8551,7 +8945,7 @@ impl LauncherApp {
                 Pos2::new(list_panel.center().x, list_top + 70.0),
                 "正在自动选择 Modrinth 线路并搜索…",
                 9.0,
-                theme::MUTED,
+                theme::muted(),
                 false,
             );
         } else if let Some(error) = self.resource_search_error.as_ref() {
@@ -8574,7 +8968,7 @@ impl LauncherApp {
                 Pos2::new(list_panel.center().x, list_top + 70.0),
                 format!("没有找到符合条件的{}", category.label()),
                 9.0,
-                theme::MUTED,
+                theme::muted(),
                 false,
             );
         }
@@ -8651,7 +9045,7 @@ impl LauncherApp {
             Pos2::new(detail_heading.left() + 22.0, detail_heading.top() + 12.0),
             format!("{}详情", category.label()),
             8.0,
-            theme::MUTED,
+            theme::muted(),
         );
         theme::bold_text(
             &detail_heading_content,
@@ -8668,7 +9062,7 @@ impl LauncherApp {
                 })
                 .unwrap_or_else(|| "等待选择项目".to_owned()),
             19.0,
-            theme::INK,
+            theme::ink(),
         );
         let detail_card = motion.rect(Rect::from_min_size(
             Pos2::new(source_detail.left(), source_detail.top() + 90.0),
@@ -8695,7 +9089,7 @@ impl LauncherApp {
                 Pos2::new(info_x, detail_card.top() + 50.0),
                 &project.description,
                 9.0,
-                theme::INK_SOFT,
+                theme::ink_soft(),
                 detail_card.width() - 48.0,
             );
             theme::text(
@@ -8719,7 +9113,7 @@ impl LauncherApp {
                     detail_card.width() - 48.0,
                 ),
                 7.8,
-                theme::MUTED,
+                theme::muted(),
             );
         }
         let download = motion.rect(Rect::from_min_size(
@@ -8745,7 +9139,6 @@ impl LauncherApp {
             && settings_button(ui, detail_base, download, "resource-download", &label, true)
             && !downloading
             && let Some(project) = view.project
-            && let Some(game_directory) = self.version_data_directory()
         {
             let loader = if matches!(category, ResourceCategory::Mod | ResourceCategory::Modpack)
                 && self.version().loader_family != "原版"
@@ -8754,25 +9147,64 @@ impl LauncherApp {
             } else {
                 None
             };
-            self.resource_download_name = Some(project.title.clone());
-            self.resource_download_receiver = Some(crate::resources::start_download(
-                project,
-                category,
-                self.resource_version_filter.clone(),
-                loader,
-                game_directory,
-            ));
+            if let Some(default_directory) =
+                self.resource_default_directory(category, &self.resource_version_filter)
+            {
+                let _ = fs::create_dir_all(&default_directory);
+                let extension = if category == ResourceCategory::Mod {
+                    "jar"
+                } else {
+                    "zip"
+                };
+                let mut default_name = crate::resources::sanitize_download_filename(&format!(
+                    "{}-{}",
+                    project.title, self.resource_version_filter
+                ));
+                if category == ResourceCategory::Mod {
+                    default_name = default_name.replace('~', "-");
+                }
+                let default_path = default_directory.join(format!("{default_name}.{extension}"));
+                if let Some(destination_file) = pick_save_file(
+                    &default_path,
+                    &format!("保存{}", category.label()),
+                    extension,
+                    &format!("{}文件", category.label()),
+                ) {
+                    let destination_directory = destination_file
+                        .parent()
+                        .unwrap_or(&default_directory)
+                        .to_path_buf();
+                    self.resource_download_directories
+                        .insert(category, destination_directory.clone());
+                    self.resource_download_name = Some(project.title.clone());
+                    self.resource_download_receiver = Some(crate::resources::start_download(
+                        project,
+                        category,
+                        self.resource_version_filter.clone(),
+                        loader,
+                        destination_file,
+                    ));
+                }
+            } else {
+                self.show_toast("当前没有可用的游戏目录");
+            }
         }
         let footer = motion.rect(Rect::from_min_size(
             Pos2::new(source_detail.left() + 4.0, source_detail.bottom() - 36.0),
             Vec2::new(source_detail.width() - 160.0, 20.0),
         ));
+        let footer_text = format!(
+            "默认 {} · 下载前可选择其他位置和文件名",
+            self.resource_default_directory(category, &self.resource_version_filter)
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| category.target_folder().to_owned())
+        );
         theme::text(
             detail_base,
             footer.left_top(),
-            format!("将保存到 {}", category.target_folder()),
+            fit_text_to_width(detail_base, &footer_text, theme::font(8.0), footer.width()),
             8.0,
-            theme::MUTED,
+            theme::muted(),
         );
     }
 
@@ -8819,14 +9251,14 @@ impl LauncherApp {
                     Pos2::new(menu.left() + 16.0, menu.top() + 13.0),
                     "选择 Minecraft 版本",
                     9.2,
-                    theme::INK,
+                    theme::ink(),
                 );
                 theme::text(
                     &content,
                     Pos2::new(menu.left() + 16.0, menu.top() + 34.0),
                     "筛选适用于指定游戏版本的资源",
                     7.4,
-                    theme::MUTED,
+                    theme::muted(),
                 );
 
                 let list = Rect::from_min_max(
@@ -8884,9 +9316,9 @@ impl LauncherApp {
                         id,
                         9.0,
                         if selected {
-                            theme::INK
+                            theme::ink()
                         } else {
-                            theme::INK_SOFT
+                            theme::ink_soft()
                         },
                     );
                     theme::text(
@@ -8897,7 +9329,7 @@ impl LauncherApp {
                         if selected {
                             theme::GREEN_BRIGHT
                         } else {
-                            theme::MUTED
+                            theme::muted()
                         },
                     );
                     if response.clicked() {
@@ -8948,14 +9380,14 @@ impl LauncherApp {
             Pos2::new(detail_heading.left() + 22.0, detail_heading.top() + 12.0),
             "下载详情",
             8.0,
-            theme::MUTED,
+            theme::muted(),
         );
         theme::bold_text(
             painter,
             Pos2::new(detail_heading.left() + 22.0, detail_heading.top() + 30.0),
             &view.version.id,
             20.0,
-            theme::INK,
+            theme::ink(),
         );
 
         let detail_card = motion.rect(Rect::from_min_size(
@@ -9003,35 +9435,35 @@ impl LauncherApp {
             Pos2::new(info_x, detail_card.top() + 24.0),
             "版本类型",
             8.0,
-            theme::MUTED,
+            theme::muted(),
         );
         theme::bold_text(
             painter,
             Pos2::new(info_x, detail_card.top() + 40.0),
             download_version_kind(&view.version.kind),
             12.0,
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
         theme::text(
             painter,
             Pos2::new(info_x, detail_card.top() + 76.0),
             "下载来源",
             8.0,
-            theme::MUTED,
+            theme::muted(),
         );
         theme::bold_text(
             painter,
             Pos2::new(info_x, detail_card.top() + 92.0),
             "Mojang Piston Meta",
             11.0,
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
         theme::text(
             painter,
             Pos2::new(info_x, detail_card.top() + 128.0),
             "安装流程",
             8.0,
-            theme::MUTED,
+            theme::muted(),
         );
         theme::text(
             painter,
@@ -9083,7 +9515,7 @@ impl LauncherApp {
             Pos2::new(loader_card.left() + 42.0, loader_card.top() + 11.0),
             "模组加载器",
             8.0,
-            theme::MUTED,
+            theme::muted(),
         );
         theme::bold_text(
             painter,
@@ -9092,17 +9524,17 @@ impl LauncherApp {
                 .map(|kind| format!("{} · Minecraft {}", kind.label(), self.loader_base_version))
                 .unwrap_or_else(|| "原版 / 不使用加载器".to_owned()),
             12.0,
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
         let arrow_center = Pos2::new(loader_card.right() - 28.0, loader_card.top() + 29.0);
         let arrow_y = 4.0 - 8.0 * loader_eased;
         painter.line_segment(
             [arrow_center + Vec2::new(-5.0, arrow_y), arrow_center],
-            Stroke::new(1.6, theme::INK_SOFT),
+            Stroke::new(1.6, theme::ink_soft()),
         );
         painter.line_segment(
             [arrow_center, arrow_center + Vec2::new(5.0, arrow_y)],
-            Stroke::new(1.6, theme::INK_SOFT),
+            Stroke::new(1.6, theme::ink_soft()),
         );
         if loader_response.clicked() {
             self.download_loader_open = !self.download_loader_open;
@@ -9149,7 +9581,11 @@ impl LauncherApp {
                     option.center(),
                     label,
                     8.2,
-                    if selected { theme::INK } else { theme::MUTED },
+                    if selected {
+                        theme::ink()
+                    } else {
+                        theme::muted()
+                    },
                     selected,
                 );
                 if response.clicked() && !selected {
@@ -9194,7 +9630,7 @@ impl LauncherApp {
                         list.center(),
                         format!("正在获取 {} 版本…", kind.label()),
                         8.5,
-                        theme::MUTED,
+                        theme::muted(),
                         false,
                     );
                 } else if let Some(error) = &self.loader_versions_error {
@@ -9255,9 +9691,9 @@ impl LauncherApp {
                             loader_display_version(&self.loader_base_version, version),
                             8.5,
                             if selected {
-                                theme::INK
+                                theme::ink()
                             } else {
-                                theme::INK_SOFT
+                                theme::ink_soft()
                             },
                         );
                         if selected {
@@ -9280,7 +9716,7 @@ impl LauncherApp {
                     Pos2::new(loader_card.left() + 20.0, loader_card.top() + 104.0),
                     "保持原版安装，不添加模组加载器。",
                     8.5,
-                    theme::MUTED,
+                    theme::muted(),
                 );
             }
         }
@@ -9326,7 +9762,7 @@ impl LauncherApp {
                 "只使用 Mojang 官方下载域名，并在安装前校验文件"
             },
             8.0,
-            theme::MUTED,
+            theme::muted(),
         );
     }
 
@@ -9360,14 +9796,14 @@ impl LauncherApp {
             Pos2::new(header.left() + 24.0, header.top() + 16.0),
             "收藏",
             21.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             &header_content,
             Pos2::new(header.left() + 24.0, header.top() + 47.0),
             "收藏 Minecraft 社区网站，或创建自己的快捷入口",
             8.5,
-            theme::MUTED,
+            theme::muted(),
         );
         let add = Rect::from_min_size(
             Pos2::new(header.right() - 142.0, header.top() + 27.0),
@@ -9497,14 +9933,14 @@ impl LauncherApp {
                     card.width() - 100.0,
                 ),
                 12.0,
-                theme::INK,
+                theme::ink(),
             );
             theme::text(
                 &card_painter,
                 Pos2::new(card.left() + 75.0, card.top() + 48.0),
                 crate::favorites::site_domain(&site.url),
                 8.0,
-                theme::MUTED,
+                theme::muted(),
             );
             theme::text(
                 &card_painter,
@@ -9522,7 +9958,7 @@ impl LauncherApp {
                 Pos2::new(card.right() - 20.0, card.bottom() - 30.0),
                 "→",
                 9.0,
-                theme::MUTED,
+                theme::muted(),
             );
             if index >= builtin_count {
                 let remove = Rect::from_center_size(
@@ -9550,7 +9986,7 @@ impl LauncherApp {
                     &card_painter,
                     NavIcon::Close,
                     remove.shrink(6.0),
-                    theme::MUTED,
+                    theme::muted(),
                 );
                 if remove_response.clicked() {
                     self.settings
@@ -9679,14 +10115,14 @@ impl LauncherApp {
                     Pos2::new(dialog.left() + 22.0, dialog.top() + 18.0),
                     "添加收藏网站",
                     18.0,
-                    theme::INK,
+                    theme::ink(),
                 );
                 theme::text(
                     &content,
                     Pos2::new(dialog.left() + 22.0, dialog.top() + 46.0),
                     "自动读取网站图标，也可指定图片 URL 或本地图片",
                     8.0,
-                    theme::MUTED,
+                    theme::muted(),
                 );
                 let title = Rect::from_min_size(
                     Pos2::new(dialog.left() + 22.0, dialog.top() + 78.0),
@@ -9730,7 +10166,7 @@ impl LauncherApp {
                     egui::TextEdit::singleline(&mut self.favorite_title_input)
                         .frame(egui::Frame::NONE)
                         .font(theme::font(8.8))
-                        .text_color(theme::INK)
+                        .text_color(theme::ink())
                         .hint_text("网站名称（可留空）"),
                 );
                 ui.put(
@@ -9738,7 +10174,7 @@ impl LauncherApp {
                     egui::TextEdit::singleline(&mut self.favorite_url_input)
                         .frame(egui::Frame::NONE)
                         .font(theme::font(8.8))
-                        .text_color(theme::INK)
+                        .text_color(theme::ink())
                         .hint_text("https://example.com"),
                 );
                 ui.put(
@@ -9746,7 +10182,7 @@ impl LauncherApp {
                     egui::TextEdit::singleline(&mut self.favorite_icon_input)
                         .frame(egui::Frame::NONE)
                         .font(theme::font(8.0))
-                        .text_color(theme::INK)
+                        .text_color(theme::ink())
                         .hint_text("图标 URL（留空自动）"),
                 );
                 if self.favorite_editor_open
@@ -9781,7 +10217,7 @@ impl LauncherApp {
                     Pos2::new(dialog.left() + 22.0, dialog.top() + 211.0),
                     "图标留空时优先读取对应网站 favicon，支持 PNG、JPG、WebP 和 ICO",
                     7.3,
-                    theme::MUTED,
+                    theme::muted(),
                 );
                 if let Some(error) = self.favorite_editor_error.as_ref() {
                     theme::text(
@@ -9868,14 +10304,14 @@ impl LauncherApp {
             Pos2::new(main.left() + 24.0, main.top() + 20.0),
             "收藏与模组",
             21.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             painter,
             Pos2::new(main.left() + 24.0, main.top() + 48.0),
             "管理收藏内容与当前版本的模组",
             8.5,
-            theme::MUTED,
+            theme::muted(),
         );
         for (index, label) in ["收藏模组", "收藏动态"].into_iter().enumerate() {
             let tab = Rect::from_min_size(
@@ -9903,7 +10339,11 @@ impl LauncherApp {
                 tab.center(),
                 label,
                 8.5,
-                if selected { theme::INK } else { theme::MUTED },
+                if selected {
+                    theme::ink()
+                } else {
+                    theme::muted()
+                },
                 selected,
             );
             if response.clicked() {
@@ -9965,7 +10405,7 @@ impl LauncherApp {
                     "正在获取收藏动态"
                 },
                 10.0,
-                theme::MUTED,
+                theme::muted(),
                 false,
             );
         }
@@ -10021,14 +10461,14 @@ impl LauncherApp {
                 Pos2::new(row.left() + 42.0, row.top() + 7.0),
                 ellipsize_end(title, 42),
                 9.4,
-                theme::INK_SOFT,
+                theme::ink_soft(),
             );
             theme::text(
                 &row_content,
                 Pos2::new(row.left() + 42.0, row.top() + 25.0),
                 ellipsize_end(detail, 50),
                 7.4,
-                theme::MUTED,
+                theme::muted(),
             );
             if response.clicked()
                 && let Some(news_index) = news_index
@@ -10045,7 +10485,7 @@ impl LauncherApp {
             Pos2::new(side.left() + 20.0, side.top() + 20.0),
             "模组环境",
             16.0,
-            theme::INK,
+            theme::ink(),
         );
         let mod_count = self
             .version_data_directory()
@@ -10070,21 +10510,21 @@ impl LauncherApp {
             Pos2::new(side.left() + 52.0, side.top() + 56.0),
             "已安装模组",
             8.2,
-            theme::MUTED,
+            theme::muted(),
         );
         theme::bold_text(
             painter,
             Pos2::new(side.left() + 52.0, side.top() + 71.0),
             format!("{} · {}", self.version().version, self.version().loader),
             10.5,
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
         painter.line_segment(
             [
                 Pos2::new(side.left() + 20.0, side.top() + 108.0),
                 Pos2::new(side.right() - 20.0, side.top() + 108.0),
             ],
-            Stroke::new(1.0, theme::LINE),
+            Stroke::new(1.0, theme::line()),
         );
         let mods_dir = self
             .version_data_directory()
@@ -10125,7 +10565,7 @@ impl LauncherApp {
             Pos2::new(side.left() + 20.0, side.top() + 225.0),
             "收藏内容与模组管理已在同一页面整合。安装模组后，刷新即可在上方列表中查看。",
             8.2,
-            theme::MUTED,
+            theme::muted(),
             side.width() - 40.0,
         );
         let _ = ctx;
@@ -10309,14 +10749,14 @@ impl LauncherApp {
             Pos2::new(header.left() + 24.0, header.top() + 16.0),
             "创造",
             21.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             &header_content,
             Pos2::new(header.left() + 24.0, header.top() + 47.0),
             "制作 Minecraft 皮肤与模组工程",
             8.5,
-            theme::MUTED,
+            theme::muted(),
         );
         let tab_center =
             header.right() - 232.0 + self.create_tab_position.clamp(0.0, 1.0) * 108.0 + 50.0;
@@ -10362,7 +10802,11 @@ impl LauncherApp {
                 tab.center(),
                 label,
                 8.8,
-                if selected { theme::INK } else { theme::MUTED },
+                if selected {
+                    theme::ink()
+                } else {
+                    theme::muted()
+                },
                 selected,
             );
             if response.clicked() {
@@ -10544,14 +10988,14 @@ impl LauncherApp {
             Pos2::new(tools_x, body.top() + 24.0),
             "64 × 64 皮肤画布",
             16.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             painter,
             Pos2::new(tools_x, body.top() + 51.0),
             "在画布上点击或拖动绘制像素 · Ctrl+Z 撤销",
             8.2,
-            theme::MUTED,
+            theme::muted(),
         );
         let color_swatch =
             Rect::from_min_size(Pos2::new(tools_x, body.top() + 92.0), Vec2::splat(36.0));
@@ -10578,14 +11022,14 @@ impl LauncherApp {
             Pos2::new(tools_x + 48.0, body.top() + 91.0),
             skin_rgb_hex(self.skin_color),
             11.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             painter,
             Pos2::new(tools_x + 48.0, body.top() + 113.0),
             "完整 RGB · 每个通道 0–255",
             7.6,
-            theme::MUTED,
+            theme::muted(),
         );
         let slider_width = tools_width.clamp(250.0, 366.0);
         let channels = [
@@ -10693,6 +11137,7 @@ impl LauncherApp {
             ("导入 PNG", "skin-import"),
             ("导出 PNG", "skin-export"),
             ("清空画布", "skin-clear"),
+            ("应用皮肤", "skin-apply"),
         ];
         for (index, (label, id)) in buttons.into_iter().enumerate() {
             let button = Rect::from_min_size(
@@ -10703,7 +11148,7 @@ impl LauncherApp {
                 match index {
                     0 => self.import_skin_file(),
                     1 => self.export_skin_file(),
-                    _ => {
+                    2 => {
                         let before = self.skin_pixels.clone();
                         self.skin_pixels.fill(0);
                         self.skin_history.record(before, &self.skin_pixels);
@@ -10713,6 +11158,7 @@ impl LauncherApp {
                         self.skin_dirty = true;
                         self.skin_status = Some("画布已清空".to_owned());
                     }
+                    _ => self.apply_editor_skin_to_account(ui.ctx()),
                 }
             }
         }
@@ -10731,14 +11177,14 @@ impl LauncherApp {
             Pos2::new(preview_card.left() + 18.0, preview_card.top() + 17.0),
             "3D 角色预览",
             10.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             &preview_inner,
             Pos2::new(preview_card.left() + 18.0, preview_card.top() + 39.0),
             "右键拖动旋转 · 左键在模型上绘制",
             7.5,
-            theme::MUTED,
+            theme::muted(),
         );
         let preview_stage = Rect::from_min_max(
             Pos2::new(preview_card.left() + 14.0, preview_card.top() + 58.0),
@@ -10839,14 +11285,14 @@ impl LauncherApp {
             Pos2::new(left, body.top() + 24.0),
             "模组工程",
             17.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             painter,
             Pos2::new(left, body.top() + 52.0),
             "生成 Java 源码与 Gradle 工程 · Minecraft 目标版本独立设置",
             8.3,
-            theme::MUTED,
+            theme::muted(),
         );
         let fields = [
             ("模组名称", 0),
@@ -10857,7 +11303,13 @@ impl LauncherApp {
         ];
         for (index, (label, kind)) in fields.into_iter().enumerate() {
             let y = body.top() + 82.0 + index as f32 * 48.0;
-            theme::text(painter, Pos2::new(left, y + 7.0), label, 8.0, theme::MUTED);
+            theme::text(
+                painter,
+                Pos2::new(left, y + 7.0),
+                label,
+                8.0,
+                theme::muted(),
+            );
             let field =
                 Rect::from_min_size(Pos2::new(left + 128.0, y), Vec2::new(width - 128.0, 34.0));
             theme::fill_round(painter, field, theme::RADIUS, Color32::from_rgb(24, 38, 28));
@@ -10875,7 +11327,7 @@ impl LauncherApp {
                     egui::TextEdit::singleline(target)
                         .frame(egui::Frame::NONE)
                         .font(theme::font(8.8))
-                        .text_color(theme::INK),
+                        .text_color(theme::ink()),
                 );
             }
         }
@@ -10885,7 +11337,7 @@ impl LauncherApp {
             Pos2::new(left, loader_y + 7.0),
             "加载器",
             8.0,
-            theme::MUTED,
+            theme::muted(),
         );
         for (index, label) in ["Fabric", "Forge", "NeoForge"].into_iter().enumerate() {
             let button = Rect::from_min_size(
@@ -10930,9 +11382,9 @@ impl LauncherApp {
                 .unwrap_or_else(|| "尚未选择工程保存位置".to_owned()),
             8.0,
             if self.mod_output_directory.is_some() {
-                theme::INK_SOFT
+                theme::ink_soft()
             } else {
-                theme::MUTED
+                theme::muted()
             },
         );
         let choose = Rect::from_min_size(
@@ -11018,14 +11470,14 @@ impl LauncherApp {
             Pos2::new(hero.left() + 30.0, hero.top() + 48.0),
             "创造，从一个新世界开始。",
             27.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::wrapped_text(
             painter,
             Pos2::new(hero.left() + 30.0, hero.top() + 92.0),
             "创建新的生存或创造世界，导入已有存档，也可以从资源包和截图开始整理你的创作。",
             9.5,
-            theme::INK_SOFT,
+            theme::ink_soft(),
             (hero.width() * 0.58).max(330.0),
         );
         let create_world = Rect::from_min_size(
@@ -11096,14 +11548,14 @@ impl LauncherApp {
                 Pos2::new(rect.left() + 55.0, rect.top() + 22.0),
                 title,
                 12.5,
-                theme::INK,
+                theme::ink(),
             );
             theme::wrapped_text(
                 painter,
                 Pos2::new(rect.left() + 20.0, rect.top() + 62.0),
                 description,
                 8.2,
-                theme::MUTED,
+                theme::muted(),
                 rect.width() - 40.0,
             );
             theme::text(
@@ -11230,20 +11682,20 @@ impl LauncherApp {
                 Pos2::new(title_card.left() + 16.0, title_card.top() + 13.0),
                 "SETTINGS",
                 7.4,
-                theme::MUTED,
+                theme::muted(),
             );
             theme::bold_text(
                 painter,
                 Pos2::new(title_card.left() + 16.0, title_card.top() + 30.0),
                 "设置中心",
                 18.0,
-                theme::INK,
+                theme::ink(),
             );
 
             let painter = chrome_base;
             let item_top = categories.top() + 86.0;
             let target_y = item_top + 21.0 + view.section.index() as f32 * SETTINGS_ITEM_SPACING;
-            if !self.settings_highlight_initialized || !self.settings.animations {
+            if !self.settings_highlight_initialized || !self.settings.animations_enabled() {
                 self.settings_highlight_y = target_y;
                 self.settings_highlight_velocity = 0.0;
                 self.settings_highlight_initialized = true;
@@ -11311,9 +11763,9 @@ impl LauncherApp {
                     if selected {
                         theme::GREEN_BRIGHT
                     } else if response.hovered() {
-                        theme::INK_SOFT
+                        theme::ink_soft()
                     } else {
-                        theme::MUTED
+                        theme::muted()
                     },
                 );
                 theme::bold_text(
@@ -11322,9 +11774,9 @@ impl LauncherApp {
                     section.label(),
                     9.4,
                     if selected {
-                        theme::INK
+                        theme::ink()
                     } else if response.hovered() {
-                        theme::INK_SOFT
+                        theme::ink_soft()
                     } else {
                         Color32::from_rgb(163, 176, 166)
                     },
@@ -11340,14 +11792,14 @@ impl LauncherApp {
                     Pos2::new(categories.left() + 16.0, categories.bottom() - 58.0),
                     Pos2::new(categories.right() - 16.0, categories.bottom() - 58.0),
                 ],
-                Stroke::new(1.0, theme::LINE),
+                Stroke::new(1.0, theme::line()),
             );
             theme::text(
                 painter,
                 Pos2::new(categories.left() + 18.0, categories.bottom() - 45.0),
                 "配置保存在本机",
                 7.4,
-                theme::MUTED,
+                theme::muted(),
             );
             theme::mono_text(
                 painter,
@@ -11379,14 +11831,14 @@ impl LauncherApp {
             Pos2::new(heading_card.left() + 22.0, heading_y),
             view.section.label(),
             20.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             painter,
             Pos2::new(heading_card.left() + 22.0, heading_y + 30.0),
             view.section.description(),
             8.6,
-            theme::MUTED,
+            theme::muted(),
         );
         let painter = section_base;
 
@@ -11513,7 +11965,7 @@ impl LauncherApp {
                     Pos2::new(row.right() - 104.0, row.center().y - 10.0),
                     format!("{:.1} GB", self.settings.memory_mb as f32 / 1024.0),
                     14.0,
-                    theme::INK,
+                    theme::ink(),
                 );
                 row_y += row_gap;
 
@@ -11820,7 +12272,7 @@ impl LauncherApp {
                     egui::TextEdit::singleline(&mut self.settings.extra_jvm_args)
                         .frame(egui::Frame::NONE)
                         .font(theme::font(9.0))
-                        .text_color(theme::INK)
+                        .text_color(theme::ink())
                         .hint_text("可选启动参数"),
                 );
                 row_y += row_gap;
@@ -11852,72 +12304,95 @@ impl LauncherApp {
                     ))
                 };
 
-                let row = appearance_row(0, 0);
-                paint_setting_card(painter, row, time);
-                paint_toggle_row(
-                    ui,
-                    painter,
-                    row,
-                    "setting-liquid-glass",
-                    "液态玻璃",
-                    "开启 GPU 背景模糊、折射与鼠标受光；关闭后使用普通圆角卡片",
-                    &mut self.settings.liquid_glass,
-                );
-
-                let row = appearance_row(0, 1);
+                let row = view.content_motion.rect(Rect::from_min_size(
+                    Pos2::new(source_row_left, source_panel.top() + 96.0),
+                    Vec2::new(source_row_width, card_height),
+                ));
                 paint_setting_card(painter, row, time);
                 paint_setting_label(
                     painter,
                     row,
-                    "玻璃风格",
-                    "透明型提高背景透出，并使用轻微暗化层保证文字可读",
+                    "界面风格",
+                    match self.settings.appearance_mode {
+                        theme::AppearanceMode::Simple => "白色背景、黑色文字，关闭模糊和鼠标光效",
+                        theme::AppearanceMode::Frosted => "柔和背景模糊与透光，不启用液态折射",
+                        theme::AppearanceMode::Liquid => "实时折射、边缘高光和鼠标局部受光",
+                    },
                 );
-                let regular = Rect::from_min_size(
+                let simple = Rect::from_min_size(
                     Pos2::new(
-                        row.right() - SETTING_CARD_PADDING_X - 142.0,
-                        row.top() + 15.0,
+                        row.right() - SETTING_CARD_PADDING_X - 270.0,
+                        row.top() + 23.0,
                     ),
-                    Vec2::new(66.0, 30.0),
+                    Vec2::new(76.0, 36.0),
                 );
-                let clear = Rect::from_min_size(
+                let frosted = Rect::from_min_size(
                     Pos2::new(
-                        row.right() - SETTING_CARD_PADDING_X - 70.0,
-                        row.top() + 15.0,
+                        row.right() - SETTING_CARD_PADDING_X - 186.0,
+                        row.top() + 23.0,
                     ),
-                    Vec2::new(66.0, 30.0),
+                    Vec2::new(84.0, 36.0),
                 );
-                if settings_button(
-                    ui,
-                    painter,
-                    regular,
-                    "liquid-glass-regular",
-                    LiquidGlassMode::Regular.label(),
-                    self.settings.liquid_glass_mode == LiquidGlassMode::Regular,
-                ) {
-                    self.settings.liquid_glass_mode = LiquidGlassMode::Regular;
-                }
-                if settings_button(
-                    ui,
-                    painter,
-                    clear,
-                    "liquid-glass-clear",
-                    LiquidGlassMode::Clear.label(),
-                    self.settings.liquid_glass_mode == LiquidGlassMode::Clear,
-                ) {
-                    self.settings.liquid_glass_mode = LiquidGlassMode::Clear;
+                let liquid = Rect::from_min_size(
+                    Pos2::new(
+                        row.right() - SETTING_CARD_PADDING_X - 94.0,
+                        row.top() + 23.0,
+                    ),
+                    Vec2::new(84.0, 36.0),
+                );
+                for (button, mode, id) in [
+                    (simple, theme::AppearanceMode::Simple, "appearance-simple"),
+                    (
+                        frosted,
+                        theme::AppearanceMode::Frosted,
+                        "appearance-frosted",
+                    ),
+                    (liquid, theme::AppearanceMode::Liquid, "appearance-liquid"),
+                ] {
+                    if settings_button(
+                        ui,
+                        painter,
+                        button,
+                        id,
+                        mode.label(),
+                        self.settings.appearance_mode == mode,
+                    ) {
+                        self.settings.appearance_mode = mode;
+                    }
                 }
 
                 let row = appearance_row(1, 0);
                 paint_setting_card(painter, row, time);
-                paint_toggle_row(
-                    ui,
+                paint_setting_label(
                     painter,
                     row,
-                    "setting-animations",
                     "动态界面",
-                    "启用环境光斑、玻璃高光和场景动画",
-                    &mut self.settings.animations,
+                    "控制界面切换、弹窗和环境动画的幅度",
                 );
+                for (index, level) in AnimationLevel::ALL.into_iter().enumerate() {
+                    let button = Rect::from_min_size(
+                        Pos2::new(
+                            row.right() - SETTING_CARD_PADDING_X - 186.0 + index as f32 * 48.0,
+                            row.top() + 23.0,
+                        ),
+                        Vec2::new(42.0, 36.0),
+                    );
+                    if settings_button(
+                        ui,
+                        painter,
+                        button,
+                        match level {
+                            AnimationLevel::Off => "animation-level-off",
+                            AnimationLevel::Weak => "animation-level-weak",
+                            AnimationLevel::Medium => "animation-level-medium",
+                            AnimationLevel::Strong => "animation-level-strong",
+                        },
+                        level.label(),
+                        self.settings.animation_level == level,
+                    ) {
+                        self.settings.animation_level = level;
+                    }
+                }
 
                 let row = appearance_row(1, 1);
                 paint_setting_card(painter, row, time);
@@ -11933,67 +12408,87 @@ impl LauncherApp {
 
                 let row = appearance_row(2, 0);
                 paint_setting_card(painter, row, time);
-                paint_effect_slider(
-                    ui,
-                    painter,
-                    row,
-                    "setting-glass-transparency",
-                    "卡片透明度",
-                    "数值越高，背景越清晰",
-                    &mut self.settings.glass_transparency,
-                    20,
-                    100,
-                    5,
-                    "%",
-                );
+                if self.settings.appearance_mode == theme::AppearanceMode::Simple {
+                    paint_setting_label(painter, row, "卡片透明度", "简洁模式不使用透明效果");
+                    paint_status_badge(painter, row, "不适用");
+                } else {
+                    paint_effect_slider(
+                        ui,
+                        painter,
+                        row,
+                        "setting-glass-transparency",
+                        "卡片透明度",
+                        "数值越高，背景越清晰",
+                        &mut self.settings.glass_transparency,
+                        20,
+                        100,
+                        5,
+                        "%",
+                    );
+                }
 
                 let row = appearance_row(2, 1);
                 paint_setting_card(painter, row, time);
-                paint_effect_slider(
-                    ui,
-                    painter,
-                    row,
-                    "setting-pointer-brightness",
-                    "鼠标光亮度",
-                    "0% 可完全关闭鼠标光晕",
-                    &mut self.settings.pointer_brightness,
-                    0,
-                    200,
-                    10,
-                    "%",
-                );
+                if self.settings.appearance_mode == theme::AppearanceMode::Simple {
+                    paint_setting_label(painter, row, "鼠标光亮度", "简洁模式关闭鼠标光效");
+                    paint_status_badge(painter, row, "不适用");
+                } else {
+                    paint_effect_slider(
+                        ui,
+                        painter,
+                        row,
+                        "setting-pointer-brightness",
+                        "鼠标光亮度",
+                        "0% 可完全关闭鼠标光晕",
+                        &mut self.settings.pointer_brightness,
+                        0,
+                        200,
+                        10,
+                        "%",
+                    );
+                }
 
                 let row = appearance_row(3, 0);
                 paint_setting_card(painter, row, time);
-                paint_effect_slider(
-                    ui,
-                    painter,
-                    row,
-                    "setting-pointer-radius",
-                    "光效范围",
-                    "同时影响光晕和玻璃受光范围",
-                    &mut self.settings.pointer_radius,
-                    40,
-                    320,
-                    10,
-                    " px",
-                );
+                if self.settings.appearance_mode == theme::AppearanceMode::Simple {
+                    paint_setting_label(painter, row, "光效范围", "简洁模式关闭鼠标光效");
+                    paint_status_badge(painter, row, "不适用");
+                } else {
+                    paint_effect_slider(
+                        ui,
+                        painter,
+                        row,
+                        "setting-pointer-radius",
+                        "光效范围",
+                        "同时影响光晕和玻璃受光范围",
+                        &mut self.settings.pointer_radius,
+                        40,
+                        320,
+                        10,
+                        " px",
+                    );
+                }
 
                 let row = appearance_row(3, 1);
                 paint_setting_card(painter, row, time);
-                paint_effect_slider(
-                    ui,
-                    painter,
-                    row,
-                    "setting-pointer-refresh",
-                    "光效刷新率",
-                    "快速移动鼠标时的最高重绘频率",
-                    &mut self.settings.pointer_refresh_rate,
-                    20,
-                    144,
-                    4,
-                    " FPS",
-                );
+                if self.settings.appearance_mode == theme::AppearanceMode::Simple {
+                    paint_setting_label(painter, row, "光效刷新率", "简洁模式关闭鼠标光效");
+                    paint_status_badge(painter, row, "不适用");
+                } else {
+                    paint_effect_slider(
+                        ui,
+                        painter,
+                        row,
+                        "setting-pointer-refresh",
+                        "光效刷新率",
+                        "快速移动鼠标时的最高重绘频率",
+                        &mut self.settings.pointer_refresh_rate,
+                        20,
+                        144,
+                        4,
+                        " FPS",
+                    );
+                }
             }
             SettingsSection::About => {
                 let card = setting_row(row_y, 258.0);
@@ -12031,35 +12526,35 @@ impl LauncherApp {
                     Pos2::new(info_left, card.top() + 34.0),
                     brand::NAME,
                     25.0,
-                    theme::INK,
+                    theme::ink(),
                 );
                 theme::text(
                     painter,
                     Pos2::new(info_left + 1.0, card.top() + 68.0),
                     "方块启动器 · Version 0.1.0 · 原生桌面",
                     9.4,
-                    theme::MUTED,
+                    theme::muted(),
                 );
                 theme::text(
                     painter,
                     Pos2::new(info_left + 1.0, card.top() + 91.0),
                     "原生桌面启动器 · 离线游戏启动与本地目录管理",
                     9.0,
-                    theme::INK_SOFT,
+                    theme::ink_soft(),
                 );
                 painter.line_segment(
                     [
                         Pos2::new(info_left, card.top() + 119.0),
                         Pos2::new(card.right() - 24.0, card.top() + 119.0),
                     ],
-                    Stroke::new(1.0, theme::LINE),
+                    Stroke::new(1.0, theme::line()),
                 );
                 theme::text(
                     painter,
                     Pos2::new(info_left, card.top() + 129.0),
                     "支持的功能",
                     8.2,
-                    theme::MUTED,
+                    theme::muted(),
                 );
                 let detail = [
                     "官方版本下载与文件补全",
@@ -12094,7 +12589,7 @@ impl LauncherApp {
                         chip.center(),
                         fit_text_to_width(painter, label, theme::font(7.4), chip.width() - 18.0),
                         7.4,
-                        theme::INK_SOFT,
+                        theme::ink_soft(),
                         false,
                     );
                 }
@@ -12112,7 +12607,7 @@ impl LauncherApp {
                     "正在自动保存…"
                 },
                 8.0,
-                theme::MUTED,
+                theme::muted(),
             );
             let reset = Rect::from_min_size(
                 Pos2::new(panel.right() - 114.0, footer_y),
@@ -12137,23 +12632,25 @@ impl LauncherApp {
 
     fn paint_menus(&mut self, ctx: &egui::Context, layout: &Layout, time: f64) {
         let show_version = self.menu == Menu::Version || self.version_popup_value > 0.002;
-        if !show_version && self.menu != Menu::Profile {
+        let show_profile = self.menu == Menu::Profile || self.profile_popup_value > 0.002;
+        if !show_version && !show_profile {
             return;
         }
-        let (menu_rect, is_version) = if show_version {
+        let is_version = self.menu == Menu::Version || (self.menu != Menu::Profile && show_version);
+        let (menu_rect, spring_value, open) = if is_version {
             (
                 version_menu_rect(layout, self.selectable_version_order().len()),
-                true,
+                self.version_popup_value,
+                self.menu == Menu::Version,
             )
         } else {
-            (profile_menu_rect(layout), false)
+            (
+                profile_menu_rect(layout),
+                self.profile_popup_value,
+                self.menu == Menu::Profile,
+            )
         };
-        let spring_value = if is_version {
-            self.version_popup_value
-        } else {
-            1.0
-        };
-        let opacity = popup_opacity(spring_value, self.menu == Menu::Version);
+        let opacity = popup_opacity(spring_value, open);
         egui::Area::new(Id::unique("menu-foreground-layer"))
             .order(egui::Order::Foreground)
             .fixed_pos(menu_rect.min)
@@ -12163,17 +12660,22 @@ impl LauncherApp {
                 ui.set_min_size(menu_rect.size());
                 ui.set_opacity(opacity);
                 let painter = ui.painter().clone();
+                let scale = 0.82 + 0.18 * spring_value.clamp(-0.05, 1.12);
                 if is_version {
                     self.paint_version_menu(ui, &painter, layout, time);
-                    let scale = 0.82 + 0.18 * spring_value.clamp(-0.05, 1.12);
                     let anchor = menu_rect.right_top().to_vec2();
                     let transform = egui::emath::TSTransform::new(anchor - anchor * scale, scale);
                     ctx.transform_layer_shapes(ui.layer_id(), transform);
                 } else {
                     self.paint_profile_menu(ctx, ui, &painter, layout, time);
+                    let anchor = menu_rect.left_bottom().to_vec2();
+                    let transform = egui::emath::TSTransform::new(anchor - anchor * scale, scale);
+                    ctx.transform_layer_shapes(ui.layer_id(), transform);
                 }
             });
-        if is_version && (self.menu == Menu::Version || self.version_popup_value > 0.002) {
+        if (self.menu == Menu::Version || self.version_popup_value > 0.002)
+            || (self.menu == Menu::Profile || self.profile_popup_value > 0.002)
+        {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
@@ -12205,14 +12707,14 @@ impl LauncherApp {
             Pos2::new(rect.left() + 14.0, rect.top() + 11.0),
             "选择游戏版本 · 最近游玩优先",
             9.4,
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
         theme::text(
             painter,
             Pos2::new(rect.right() - 104.0, rect.top() + 11.0),
             format!("{} 个可启动版本", versions.len()),
             7.3,
-            theme::MUTED,
+            theme::muted(),
         );
         let list_top = rect.top() + 38.0;
         let list_bottom = rect.bottom() - 7.0;
@@ -12297,9 +12799,9 @@ impl LauncherApp {
                 selector_label,
                 10.2,
                 if version.launchable {
-                    theme::INK_SOFT
+                    theme::ink_soft()
                 } else {
-                    theme::MUTED
+                    theme::muted()
                 },
             );
             theme::text(
@@ -12307,7 +12809,7 @@ impl LauncherApp {
                 Pos2::new(item.left() + 42.0, item.top() + 25.0),
                 ellipsize_end(&selector_detail, 38),
                 7.4,
-                theme::MUTED,
+                theme::muted(),
             );
             if selected {
                 theme::text(
@@ -12344,7 +12846,7 @@ impl LauncherApp {
                 Pos2::new(rect.center().x, list_top + 58.0),
                 "没有可启动的完整版本",
                 8.8,
-                theme::MUTED,
+                theme::muted(),
                 false,
             );
         }
@@ -12408,29 +12910,35 @@ impl LauncherApp {
         theme::bold_text(
             painter,
             Pos2::new(rect.left() + 74.0, rect.top() + 27.0),
-            "Steve",
+            fit_text_to_width(
+                painter,
+                &self.settings.player_name,
+                theme::bold_font(12.3),
+                rect.width() - 88.0,
+            ),
             12.3,
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
         theme::text(
             painter,
             Pos2::new(rect.left() + 74.0, rect.top() + 44.0),
-            "player@blockworld.cn",
+            "离线账户 · 本地资料",
             7.1,
-            theme::MUTED,
+            theme::muted(),
         );
         painter.line_segment(
             [
                 Pos2::new(rect.left() + 12.0, rect.top() + 72.0),
                 Pos2::new(rect.right() - 12.0, rect.top() + 72.0),
             ],
-            Stroke::new(1.0, theme::LINE),
+            Stroke::new(1.0, theme::line()),
         );
 
         let rows = [
-            (NavIcon::User, "管理账户", "已登录"),
+            (NavIcon::User, "更改昵称", ""),
+            (NavIcon::Sparkles, "更换皮肤", ""),
             (NavIcon::Folder, "打开游戏目录", ""),
-            (NavIcon::Logout, "切换账户", ""),
+            (NavIcon::Logout, "切换账户", "暂不支持"),
         ];
         for (index, (icon, label, suffix)) in rows.into_iter().enumerate() {
             let row = Rect::from_min_size(
@@ -12450,14 +12958,14 @@ impl LauncherApp {
                     Pos2::new(row.left() + 14.0, row.center().y),
                     Vec2::splat(15.0),
                 ),
-                theme::MUTED,
+                theme::muted(),
             );
             theme::text(
                 painter,
                 Pos2::new(row.left() + 28.0, row.top() + 10.0),
                 label,
                 8.8,
-                theme::INK_SOFT,
+                theme::ink_soft(),
             );
             if !suffix.is_empty() {
                 theme::text(
@@ -12465,18 +12973,209 @@ impl LauncherApp {
                     Pos2::new(row.right() - 43.0, row.top() + 10.0),
                     suffix,
                     7.2,
-                    theme::MUTED,
+                    theme::muted(),
                 );
             }
             if response.clicked() {
                 self.menu = Menu::None;
                 match index {
-                    0 => self.show_toast("Microsoft 账户管理将在下一阶段接入"),
-                    1 => self.open_game_folder(ctx),
-                    _ => self.show_toast("账户切换将在下一阶段接入"),
+                    0 => self.open_account_name_dialog(),
+                    1 => self.choose_player_skin(ctx),
+                    2 => self.open_game_folder(ctx),
+                    _ => self.show_toast("暂不支持切换账户"),
                 }
             }
         }
+    }
+
+    fn paint_account_name_dialog(&mut self, ctx: &egui::Context, screen: Rect, time: f64) {
+        if !self.account_name_dialog_open && self.account_name_dialog_value <= 0.002 {
+            return;
+        }
+        let progress = self.account_name_dialog_value.clamp(-0.05, 1.12);
+        let opacity = popup_opacity(
+            self.account_name_dialog_value,
+            self.account_name_dialog_open,
+        );
+        let eased = progress.clamp(0.0, 1.0);
+        let scale = 0.88 + 0.12 * eased;
+        let source = account_name_dialog_rect(screen);
+        let card = Rect::from_center_size(
+            source.center(),
+            Vec2::new(source.width() * scale, source.height() * scale),
+        );
+        egui::Area::new(Id::unique("account-name-dialog-modal"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .movable(false)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.set_min_size(screen.size());
+                ui.painter().rect_filled(
+                    screen,
+                    0,
+                    Color32::from_black_alpha((118.0 * eased) as u8),
+                );
+                ui.set_opacity(opacity);
+                let cancel = Rect::from_min_size(
+                    Pos2::new(card.right() - 176.0, card.bottom() - 52.0),
+                    Vec2::new(70.0, 36.0),
+                );
+                let save = Rect::from_min_size(
+                    Pos2::new(card.right() - 98.0, card.bottom() - 52.0),
+                    Vec2::new(76.0, 36.0),
+                );
+                let button_responses = self.account_name_dialog_open.then(|| {
+                    (
+                        ui.interact(cancel, Id::unique("account-name-cancel"), Sense::click())
+                            .on_hover_cursor(CursorIcon::PointingHand),
+                        ui.interact(save, Id::unique("account-name-save"), Sense::click())
+                            .on_hover_cursor(CursorIcon::PointingHand),
+                    )
+                });
+                let painter = ui.painter().clone();
+                theme::glass_panel(
+                    &painter,
+                    card,
+                    theme::RADIUS,
+                    theme::GlassSpec::new(Color32::from_rgb(21, 34, 25), theme::GREEN, time, 29.0)
+                        .backdrop_blur(18.0),
+                );
+                let content = card_clip(&painter, card);
+                theme::bold_text(
+                    &content,
+                    Pos2::new(card.left() + 22.0, card.top() + 18.0),
+                    "更改玩家昵称",
+                    18.0,
+                    theme::ink(),
+                );
+                theme::text(
+                    &content,
+                    Pos2::new(card.left() + 22.0, card.top() + 47.0),
+                    "昵称会用于后续启动的离线游戏，长度 3–16 个字符",
+                    8.2,
+                    theme::muted(),
+                );
+                let field = Rect::from_min_size(
+                    Pos2::new(card.left() + 22.0, card.top() + 78.0),
+                    Vec2::new(card.width() - 44.0, 38.0),
+                );
+                theme::fill_round(
+                    &content,
+                    field,
+                    theme::RADIUS,
+                    Color32::from_rgb(24, 38, 28),
+                );
+                theme::stroke_round(&content, field, theme::RADIUS, 1.0, theme::white_alpha(30));
+                if self.account_name_dialog_open {
+                    ui.put(
+                        field.shrink2(Vec2::new(11.0, 6.0)),
+                        egui::TextEdit::singleline(&mut self.account_name_input)
+                            .frame(egui::Frame::NONE)
+                            .font(theme::font(10.0))
+                            .text_color(theme::ink())
+                            .hint_text("3–16 位字母、数字或下划线"),
+                    );
+                } else {
+                    theme::text(
+                        &content,
+                        Pos2::new(field.left() + 11.0, field.top() + 11.0),
+                        &self.account_name_input,
+                        10.0,
+                        theme::ink(),
+                    );
+                }
+                theme::text(
+                    &content,
+                    Pos2::new(card.left() + 22.0, card.top() + 126.0),
+                    if let Some(error) = self.account_name_error.as_ref() {
+                        fit_text_to_width(&content, error, theme::font(8.0), card.width() - 44.0)
+                    } else {
+                        "更改昵称不会改变本地存档的玩家 UUID".to_owned()
+                    },
+                    8.0,
+                    if self.account_name_error.is_some() {
+                        Color32::from_rgb(226, 172, 91)
+                    } else {
+                        theme::muted()
+                    },
+                );
+                if self.account_name_dialog_open {
+                    if let Some((cancel_response, save_response)) = button_responses.as_ref() {
+                        theme::fill_round(
+                            &content,
+                            cancel,
+                            theme::RADIUS,
+                            if cancel_response.hovered() {
+                                Color32::from_rgb(37, 53, 42)
+                            } else {
+                                Color32::from_rgb(28, 42, 33)
+                            },
+                        );
+                        theme::stroke_round(
+                            &content,
+                            cancel,
+                            theme::RADIUS,
+                            1.0,
+                            theme::white_alpha(34),
+                        );
+                        theme::center_text(
+                            &content,
+                            cancel.center(),
+                            "取消",
+                            8.8,
+                            theme::ink_soft(),
+                            false,
+                        );
+                        theme::liquid_button(
+                            &content,
+                            save,
+                            theme::RADIUS,
+                            2.2,
+                            save_response.hovered(),
+                        );
+                        theme::center_text(
+                            &content,
+                            save.center(),
+                            "保存",
+                            9.0,
+                            Color32::WHITE,
+                            true,
+                        );
+                    }
+                    if button_responses
+                        .as_ref()
+                        .is_some_and(|(response, _)| response.clicked())
+                    {
+                        self.account_name_dialog_open = false;
+                        self.account_name_error = None;
+                    }
+                    if button_responses
+                        .as_ref()
+                        .is_some_and(|(_, response)| response.clicked())
+                        || ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    {
+                        self.save_account_name();
+                    }
+                } else {
+                    for (button, label) in [(cancel, "取消"), (save, "保存")] {
+                        theme::fill_round(
+                            &content,
+                            button,
+                            theme::RADIUS,
+                            Color32::from_rgb(30, 43, 34),
+                        );
+                        theme::center_text(
+                            &content,
+                            button.center(),
+                            label,
+                            8.8,
+                            theme::ink_soft(),
+                            false,
+                        );
+                    }
+                }
+            });
     }
 
     fn open_game_folder(&mut self, _ctx: &egui::Context) {
@@ -12494,6 +13193,114 @@ impl LauncherApp {
             let _ = std::process::Command::new("xdg-open").arg(folder).spawn();
         }
         self.show_toast("已打开启动器所在目录");
+    }
+
+    fn open_account_name_dialog(&mut self) {
+        self.menu = Menu::None;
+        self.account_name_dialog_open = true;
+        self.account_name_dialog_value = 0.0;
+        self.account_name_dialog_velocity = 0.0;
+        self.account_name_input = self.settings.player_name.clone();
+        self.account_name_error = None;
+    }
+
+    fn save_account_name(&mut self) {
+        match normalize_player_name(&self.account_name_input) {
+            Ok(name) => {
+                self.settings.player_name = name.clone();
+                self.account_name_dialog_open = false;
+                self.account_name_error = None;
+                self.show_toast(format!("玩家昵称已更改为 {name}"));
+            }
+            Err(error) => self.account_name_error = Some(error),
+        }
+    }
+
+    fn update_account_name_dialog_animation(&mut self, ctx: &egui::Context) {
+        let target = if self.account_name_dialog_open {
+            1.0
+        } else {
+            0.0
+        };
+        if !self.settings.animations_enabled() {
+            self.account_name_dialog_value = target;
+            self.account_name_dialog_velocity = 0.0;
+            if !self.account_name_dialog_open {
+                self.account_name_error = None;
+            }
+            return;
+        }
+        if !self.account_name_dialog_open && self.account_name_dialog_value <= 0.002 {
+            self.account_name_dialog_value = 0.0;
+            self.account_name_dialog_velocity = 0.0;
+            self.account_name_error = None;
+            return;
+        }
+        let delta = ctx.input(|input| input.stable_dt).clamp(0.001, 0.05);
+        if spring_popup(
+            &mut self.account_name_dialog_value,
+            &mut self.account_name_dialog_velocity,
+            target,
+            delta,
+        ) {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else if !self.account_name_dialog_open {
+            self.account_name_error = None;
+        }
+    }
+
+    fn choose_player_skin(&mut self, ctx: &egui::Context) {
+        self.menu = Menu::None;
+        let Some(path) = pick_image_file(false) else {
+            return;
+        };
+        let pixels = match load_player_skin(&path) {
+            Ok(pixels) => pixels,
+            Err(error) => {
+                self.show_toast(error);
+                return;
+            }
+        };
+        self.apply_player_skin_pixels(pixels, ctx, "已更换本地玩家皮肤");
+    }
+
+    fn apply_editor_skin_to_account(&mut self, ctx: &egui::Context) {
+        self.apply_player_skin_pixels(self.skin_pixels.clone(), ctx, "当前皮肤已应用到本地玩家");
+    }
+
+    fn apply_player_skin_pixels(&mut self, pixels: Vec<u8>, _ctx: &egui::Context, message: &str) {
+        let path = match save_player_skin(&pixels) {
+            Ok(path) => path,
+            Err(error) => {
+                self.show_toast(error);
+                return;
+            }
+        };
+        self.skin_pixels = pixels;
+        self.settings.player_skin = Some(path);
+        self.settings.player_skin_model_alex = self.skin_model_alex;
+        self.skin_history = SkinEditHistory::default();
+        self.skin_last_pixel = None;
+        self.skin_preview_last_face = None;
+        self.skin_stroke_before = None;
+        self.skin_dirty = true;
+        let pack_result = self
+            .version_data_directory()
+            .map(|directory| install_local_skin_resource_pack(&directory, &self.skin_pixels));
+        match pack_result {
+            Some(Ok(_)) => self.skin_status = Some(message.to_owned()),
+            Some(Err(error)) => {
+                self.skin_status = Some(format!("{message}，但资源包安装失败：{error}"));
+            }
+            None => {
+                self.skin_status = Some(format!("{message}，将在启动游戏时应用"));
+            }
+        }
+        self.show_toast(
+            self.skin_status
+                .clone()
+                .unwrap_or_else(|| message.to_owned()),
+        );
     }
 
     fn paint_news_dialog(
@@ -12568,7 +13375,7 @@ impl LauncherApp {
             painter,
             NavIcon::Close,
             Rect::from_center_size(close.center(), Vec2::splat(14.0)),
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
         if close_response.clicked() {
             self.news = None;
@@ -12594,7 +13401,7 @@ impl LauncherApp {
             Pos2::new(dialog.left() + 25.0, body_y + 18.0),
             ellipsize_end(&story.title, 34),
             21.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::wrapped_text(
             painter,
@@ -12608,7 +13415,7 @@ impl LauncherApp {
                 320,
             ),
             9.4,
-            theme::INK_SOFT,
+            theme::ink_soft(),
             dialog.width() - 50.0,
         );
 
@@ -12694,7 +13501,7 @@ impl LauncherApp {
             Pos2::new(card.left() + 126.0, card.top() + 30.0),
             "Genesis Launcher 强制更新",
             19.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             &content,
@@ -12705,14 +13512,14 @@ impl LauncherApp {
                 release.version
             ),
             9.2,
-            theme::MUTED,
+            theme::muted(),
         );
         theme::text(
             &content,
             Pos2::new(card.left() + 127.0, card.top() + 84.0),
             "检测到新版本后将自动下载、替换并重新启动，无法跳过",
             8.3,
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
         let track = Rect::from_min_size(
             Pos2::new(card.left() + 30.0, card.top() + 139.0),
@@ -12783,7 +13590,7 @@ impl LauncherApp {
                 Pos2::new(card.center().x, card.bottom() - 43.0),
                 "更新完成后将自动重新打开启动器",
                 8.1,
-                theme::MUTED,
+                theme::muted(),
                 false,
             );
         }
@@ -12826,7 +13633,7 @@ impl LauncherApp {
             Pos2::new(rect.left() + 44.0, rect.top() + 14.0),
             &toast.message,
             8.5,
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
     }
 
@@ -12856,7 +13663,7 @@ impl LauncherApp {
             Pos2::new(dialog.left() + 24.0, dialog.top() + 20.0),
             "官方版本",
             21.0,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             painter,
@@ -12872,7 +13679,7 @@ impl LauncherApp {
                 )
             },
             8.4,
-            theme::MUTED,
+            theme::muted(),
         );
         let close = Rect::from_min_size(
             Pos2::new(dialog.right() - 46.0, dialog.top() + 16.0),
@@ -12895,7 +13702,7 @@ impl LauncherApp {
             painter,
             NavIcon::Close,
             Rect::from_center_size(close.center(), Vec2::splat(14.0)),
-            theme::INK_SOFT,
+            theme::ink_soft(),
         );
         if close_response.clicked() {
             self.official_browser_open = false;
@@ -12938,7 +13745,11 @@ impl LauncherApp {
                 button.center(),
                 label,
                 8.4,
-                if selected { theme::INK } else { theme::MUTED },
+                if selected {
+                    theme::ink()
+                } else {
+                    theme::muted()
+                },
                 selected,
             );
             if response.clicked() {
@@ -13040,7 +13851,7 @@ impl LauncherApp {
                 Pos2::new(row.left() + 14.0, row.top() + 7.0),
                 &version.id,
                 10.4,
-                theme::INK_SOFT,
+                theme::ink_soft(),
             );
             theme::text(
                 &list_painter,
@@ -13053,7 +13864,7 @@ impl LauncherApp {
                     _ => &version.kind,
                 },
                 7.7,
-                theme::MUTED,
+                theme::muted(),
             );
             theme::text(
                 &list_painter,
@@ -13082,7 +13893,7 @@ impl LauncherApp {
                     "当前分类没有官方版本"
                 },
                 9.0,
-                theme::MUTED,
+                theme::muted(),
                 false,
             );
         }
@@ -13118,7 +13929,7 @@ impl LauncherApp {
                 .map(|version| format!("将安装 Minecraft {}", version.id))
                 .unwrap_or_else(|| "请选择要安装的版本".to_owned()),
             8.5,
-            theme::MUTED,
+            theme::muted(),
         );
         let install = Rect::from_min_size(
             Pos2::new(dialog.right() - 140.0, dialog.bottom() - 52.0),
@@ -13171,7 +13982,7 @@ impl LauncherApp {
             Pos2::new(rect.left() + 18.0, rect.top() + 15.0),
             &progress.stage,
             10.5,
-            theme::INK,
+            theme::ink(),
         );
         let version = self.install_version_id.as_deref().unwrap_or("Minecraft");
         let file_status = if progress.files_total == 0 {
@@ -13188,7 +13999,7 @@ impl LauncherApp {
             Pos2::new(rect.left() + 18.0, rect.top() + 37.0),
             format!("{version} · {file_status}"),
             8.2,
-            theme::MUTED,
+            theme::muted(),
         );
         let progress_ratio = if progress.total_bytes > 0 {
             (progress.completed_bytes as f32 / progress.total_bytes as f32).clamp(0.0, 1.0)
@@ -13227,7 +14038,7 @@ impl LauncherApp {
                 progress.total_bytes as f64 / 1_048_576.0
             ),
             8.0,
-            theme::MUTED,
+            theme::muted(),
         );
     }
 
@@ -13257,7 +14068,7 @@ impl LauncherApp {
             Pos2::new(rect.left() + 18.0, rect.top() + 15.0),
             &update.stage,
             10.5,
-            theme::INK,
+            theme::ink(),
         );
         theme::text(
             painter,
@@ -13269,7 +14080,7 @@ impl LauncherApp {
                 rect.width() - 36.0,
             ),
             8.0,
-            theme::MUTED,
+            theme::muted(),
         );
         let track = Rect::from_min_size(
             Pos2::new(rect.left() + 18.0, rect.top() + 72.0),
@@ -13301,6 +14112,13 @@ impl LauncherApp {
         let Some(pointer) = ctx.input(|input| input.pointer.interact_pos()) else {
             return;
         };
+        if self.account_name_dialog_open
+            && !account_name_dialog_rect(layout.screen).contains(pointer)
+        {
+            self.account_name_dialog_open = false;
+            self.account_name_error = None;
+            return;
+        }
         if self.favorite_editor_open && !favorite_editor_rect(layout.screen).contains(pointer) {
             self.cancel_favorite_editor();
         }
@@ -13368,7 +14186,7 @@ impl App for LauncherApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         // 圆角窗口的四个角靠 DWM 抠出来，底色不能是 egui 默认的深黑，
         // 否则标题栏压不到的那一圈边就算画了底色，圆角外仍会透出一圈黑边。
-        let [r, g, b, a] = theme::BG.to_normalized_gamma_f32();
+        let [r, g, b, a] = theme::background().to_normalized_gamma_f32();
         [r, g, b, a]
     }
 
@@ -13402,6 +14220,9 @@ impl App for LauncherApp {
 }
 
 fn paint_ambient_background(painter: &Painter, screen: Rect, time: f64) {
+    if theme::appearance_mode() == theme::AppearanceMode::Simple {
+        return;
+    }
     theme::vertical_gradient(
         painter,
         screen,
@@ -13464,14 +14285,14 @@ fn paint_setting_label(painter: &Painter, row: Rect, title: &str, description: &
         Pos2::new(row.left() + SETTING_CARD_PADDING_X, row.top() + 18.0),
         title,
         11.0,
-        theme::INK,
+        theme::ink(),
     );
     theme::text(
         painter,
         Pos2::new(row.left() + SETTING_CARD_PADDING_X, row.top() + 40.0),
         description,
         8.2,
-        theme::MUTED,
+        theme::muted(),
     );
 }
 
@@ -13549,7 +14370,7 @@ fn paint_effect_slider(
         Pos2::new(content.left(), row.top() + 9.0),
         title,
         9.0,
-        theme::INK_SOFT,
+        theme::ink_soft(),
     );
     painter.text(
         Pos2::new(content.right(), row.top() + 9.0),
@@ -13564,7 +14385,7 @@ fn paint_effect_slider(
             Pos2::new(content.left(), row.top() + 27.0),
             description,
             7.3,
-            theme::MUTED,
+            theme::muted(),
         );
     }
     let track = Rect::from_min_size(
@@ -13681,7 +14502,7 @@ fn paint_skin_rgb_slider(
         egui::Align2::RIGHT_TOP,
         value.to_string(),
         theme::bold_font(8.8),
-        theme::INK_SOFT,
+        theme::ink_soft(),
     );
 }
 
@@ -13744,7 +14565,7 @@ fn paint_page_heading(
         Pos2::new(title_card.left() + 14.0, title_card.top() + 3.0),
         page_kicker(page),
         7.5,
-        theme::MUTED,
+        theme::muted(),
     );
     theme::bold_text(
         painter,
@@ -13858,7 +14679,7 @@ fn compact_icon_button(
             Pos2::new(rect.center().x - 6.0, rect.center().y),
             Pos2::new(rect.center().x + 6.0, rect.center().y),
         ],
-        Stroke::new(1.5, theme::INK_SOFT),
+        Stroke::new(1.5, theme::ink_soft()),
     );
     if plus {
         painter.line_segment(
@@ -13866,7 +14687,7 @@ fn compact_icon_button(
                 Pos2::new(rect.center().x, rect.center().y - 6.0),
                 Pos2::new(rect.center().x, rect.center().y + 6.0),
             ],
-            Stroke::new(1.5, theme::INK_SOFT),
+            Stroke::new(1.5, theme::ink_soft()),
         );
     }
     response.clicked()
@@ -13900,7 +14721,7 @@ fn settings_button(
             },
         );
         theme::stroke_round(painter, rect, theme::RADIUS, 1.0, theme::white_alpha(34));
-        theme::center_text(painter, rect.center(), label, 8.8, theme::INK_SOFT, false);
+        theme::center_text(painter, rect.center(), label, 8.8, theme::ink_soft(), false);
     }
     response.clicked()
 }
@@ -13980,6 +14801,45 @@ mod tests {
             parse_favorite_site("Example\u{1f}https://example.com\u{1f}C:\\icons\\example.png")
                 .unwrap();
         assert_eq!(configured.icon_source, "C:\\icons\\example.png");
+    }
+
+    #[test]
+    fn validates_offline_player_names() {
+        assert_eq!(normalize_player_name(" Steve_01 ").unwrap(), "Steve_01");
+        assert!(normalize_player_name("ab").is_err());
+        assert!(normalize_player_name("玩家名称").is_err());
+        assert!(normalize_player_name("name-with-dash").is_err());
+        assert!(normalize_player_name("this_name_is_too_long").is_err());
+    }
+
+    #[test]
+    fn installs_local_skin_resource_pack_and_enables_it() {
+        let root = std::env::temp_dir().join(format!(
+            "genesis-launcher-skin-pack-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("options.txt"),
+            "resourcePacks:[\"vanilla\",\"file/Another.zip\"]\n",
+        )
+        .unwrap();
+        let pack = install_local_skin_resource_pack(&root, &default_skin_pixels()).unwrap();
+        assert!(pack.is_file());
+        let options = std::fs::read_to_string(root.join("options.txt")).unwrap();
+        assert!(options.contains(LOCAL_SKIN_PACK_NAME));
+        assert!(options.contains("file/Another.zip"));
+        let file = std::fs::File::open(&pack).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        assert!(
+            archive
+                .file_names()
+                .any(|name| name == "assets/minecraft/textures/entity/player/wide/steve.png")
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -14186,20 +15046,45 @@ mod tests {
     }
 
     #[test]
-    fn liquid_glass_is_disabled_by_default() {
+    fn appearance_defaults_to_simple() {
         let settings = LauncherSettings::default();
-        assert!(!settings.liquid_glass);
-        assert_eq!(settings.liquid_glass_mode, LiquidGlassMode::Regular);
+        assert_eq!(settings.appearance_mode, theme::AppearanceMode::Simple);
     }
 
     #[test]
-    fn legacy_glass_setting_migrates_to_off_and_new_choices_persist() {
-        assert!(!resolve_liquid_glass_setting(0, Some(true)));
-        assert!(resolve_liquid_glass_setting(SETTINGS_REVISION, Some(true)));
-        assert!(!resolve_liquid_glass_setting(
-            SETTINGS_REVISION,
-            Some(false)
-        ));
+    fn appearance_modes_migrate_from_legacy_glass_settings() {
+        assert_eq!(
+            resolve_appearance_mode(0, None, Some(false), None),
+            theme::AppearanceMode::Simple
+        );
+        assert_eq!(
+            resolve_appearance_mode(0, None, Some(true), Some("regular")),
+            theme::AppearanceMode::Frosted
+        );
+        assert_eq!(
+            resolve_appearance_mode(0, None, Some(true), Some("clear")),
+            theme::AppearanceMode::Liquid
+        );
+        assert_eq!(
+            resolve_appearance_mode(
+                SETTINGS_REVISION,
+                Some(theme::AppearanceMode::Liquid),
+                Some(false),
+                None
+            ),
+            theme::AppearanceMode::Liquid
+        );
+    }
+
+    #[test]
+    fn animation_levels_cover_four_distinct_strengths() {
+        assert_eq!(
+            AnimationLevel::ALL.map(AnimationLevel::label),
+            ["关", "弱", "中", "强"]
+        );
+        assert_eq!(AnimationLevel::Off.strength(), 0.0);
+        assert!(AnimationLevel::Weak.strength() < AnimationLevel::Medium.strength());
+        assert!(AnimationLevel::Strong.strength() > AnimationLevel::Medium.strength());
     }
 
     #[test]
@@ -14438,7 +15323,7 @@ fn ellipsize_start(value: &str, max_chars: usize) -> String {
 
 fn fit_text_to_width(painter: &Painter, value: &str, font: egui::FontId, max_width: f32) -> String {
     if painter
-        .layout_no_wrap(value.to_owned(), font.clone(), theme::INK)
+        .layout_no_wrap(value.to_owned(), font.clone(), theme::ink())
         .size()
         .x
         <= max_width
@@ -14450,7 +15335,7 @@ fn fit_text_to_width(painter: &Painter, value: &str, font: egui::FontId, max_wid
         chars.pop();
         let candidate = format!("{}…", chars.iter().collect::<String>());
         if painter
-            .layout_no_wrap(candidate.clone(), font.clone(), theme::INK)
+            .layout_no_wrap(candidate.clone(), font.clone(), theme::ink())
             .size()
             .x
             <= max_width
@@ -14489,13 +15374,24 @@ fn relative_play_time(timestamp: u64) -> String {
     }
 }
 
+fn animation_strength() -> f32 {
+    ANIMATION_STRENGTH.load(Ordering::Relaxed) as f32 / 100.0
+}
+
 fn spring_popup(value: &mut f32, velocity: &mut f32, target: f32, delta: f32) -> bool {
     const STIFFNESS: f32 = 310.0;
     const DAMPING: f32 = 21.0;
+    let strength = animation_strength();
+    if strength <= 0.0 {
+        *value = target;
+        *velocity = 0.0;
+        return false;
+    }
+    let strength = strength.clamp(0.35, 1.7);
     let substeps = (delta / 0.008).ceil().clamp(1.0, 8.0) as usize;
     let step = delta / substeps as f32;
     for _ in 0..substeps {
-        let acceleration = (target - *value) * STIFFNESS - *velocity * DAMPING;
+        let acceleration = (target - *value) * STIFFNESS * strength - *velocity * DAMPING;
         *velocity += acceleration * step;
         *value += *velocity * step;
     }
@@ -14516,10 +15412,17 @@ fn spring_popup(value: &mut f32, velocity: &mut f32, target: f32, delta: f32) ->
 fn spring_smooth(value: &mut f32, velocity: &mut f32, target: f32, delta: f32) -> bool {
     const STIFFNESS: f32 = 270.0;
     const DAMPING: f32 = 20.0;
+    let strength = animation_strength();
+    if strength <= 0.0 {
+        *value = target;
+        *velocity = 0.0;
+        return false;
+    }
+    let strength = strength.clamp(0.35, 1.7);
     let substeps = (delta / 0.008).ceil().clamp(1.0, 8.0) as usize;
     let step = delta / substeps as f32;
     for _ in 0..substeps {
-        let acceleration = (target - *value) * STIFFNESS - *velocity * DAMPING;
+        let acceleration = (target - *value) * STIFFNESS * strength - *velocity * DAMPING;
         *velocity += acceleration * step;
         *value += *velocity * step;
     }
@@ -14695,6 +15598,174 @@ fn pick_export_file(default_name: &str) -> Option<PathBuf> {
     }
 }
 
+fn pick_save_file(
+    default_path: &std::path::Path,
+    description: &str,
+    extension: &str,
+    filter_label: &str,
+) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let initial_directory = default_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_string_lossy()
+            .replace('\'', "''");
+        let file_name = default_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .replace('\'', "''");
+        let description = description.replace('\'', "''");
+        let filter_label = filter_label.replace('\'', "''");
+        let extension = extension.trim_start_matches('.');
+        let script = format!(
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.SaveFileDialog; $d.Title='{description}'; $d.InitialDirectory='{initial_directory}'; $d.FileName='{file_name}'; $d.Filter='{filter_label} (*.{extension})|*.{extension}|所有文件 (*.*)|*.*'; $d.DefaultExt='{extension}'; $d.AddExtension=$true; $d.OverwritePrompt=$true; if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){{[Console]::Out.Write($d.FileName)}}"
+        );
+        let mut command = std::process::Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-STA", "-Command", &script])
+            .creation_flags(0x0800_0000);
+        let output = command.output().ok()?;
+        let selected = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        (!selected.is_empty()).then(|| PathBuf::from(selected))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (default_path, description, extension, filter_label);
+        None
+    }
+}
+
+const LOCAL_SKIN_PACK_NAME: &str = "Genesis Launcher Local Skin.zip";
+
+fn load_player_skin(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let image = image::open(path)
+        .map_err(|error| format!("无法读取皮肤文件：{error}"))?
+        .to_rgba8();
+    if image.width() == 64 && image.height() == 64 {
+        return Ok(image.into_raw());
+    }
+    if image.width() == 64 && image.height() == 32 {
+        let mut pixels = vec![0; 64 * 64 * 4];
+        pixels[..64 * 32 * 4].copy_from_slice(&image.into_raw());
+        return Ok(pixels);
+    }
+    if image.width() == image.height() && image.width() > 64 && image.width() % 64 == 0 {
+        return Ok(
+            image::imageops::resize(&image, 64, 64, image::imageops::FilterType::Nearest)
+                .into_raw(),
+        );
+    }
+    Err("皮肤必须是 64×64、64×32 或 64 倍数的正方形 PNG".to_owned())
+}
+
+fn save_player_skin(pixels: &[u8]) -> Result<PathBuf, String> {
+    let directory = brand::data_directory();
+    fs::create_dir_all(&directory).map_err(|error| format!("无法创建皮肤目录：{error}"))?;
+    let path = directory.join("player-skin.png");
+    let image = image::RgbaImage::from_raw(64, 64, pixels.to_vec())
+        .ok_or_else(|| "皮肤像素数据无效".to_owned())?;
+    image
+        .save(&path)
+        .map_err(|error| format!("无法保存玩家皮肤：{error}"))?;
+    Ok(path)
+}
+
+fn install_local_skin_resource_pack(
+    data_directory: &std::path::Path,
+    pixels: &[u8],
+) -> Result<PathBuf, String> {
+    let resourcepacks = data_directory.join("resourcepacks");
+    fs::create_dir_all(&resourcepacks).map_err(|error| format!("无法创建资源包目录：{error}"))?;
+    let pack_path = resourcepacks.join(LOCAL_SKIN_PACK_NAME);
+    let image = image::RgbaImage::from_raw(64, 64, pixels.to_vec())
+        .ok_or_else(|| "皮肤像素数据无效".to_owned())?;
+    let mut png = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|error| format!("无法编码玩家皮肤：{error}"))?;
+
+    let file =
+        fs::File::create(&pack_path).map_err(|error| format!("无法创建本地皮肤资源包：{error}"))?;
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let metadata = r#"{"pack":{"pack_format":34,"description":"Genesis Launcher Local Skin","supported_formats":{"min_inclusive":1,"max_inclusive":999}}}"#;
+    for (path, bytes) in [
+        ("pack.mcmeta", metadata.as_bytes()),
+        ("pack.png", png.as_slice()),
+        (
+            "assets/minecraft/textures/entity/player/wide/steve.png",
+            png.as_slice(),
+        ),
+        (
+            "assets/minecraft/textures/entity/player/slim/alex.png",
+            png.as_slice(),
+        ),
+        ("assets/minecraft/textures/entity/steve.png", png.as_slice()),
+        ("assets/minecraft/textures/entity/alex.png", png.as_slice()),
+    ] {
+        archive
+            .start_file(path, options)
+            .map_err(|error| format!("无法写入皮肤资源包：{error}"))?;
+        archive
+            .write_all(bytes)
+            .map_err(|error| format!("无法写入皮肤资源包：{error}"))?;
+    }
+    archive
+        .finish()
+        .map_err(|error| format!("无法完成皮肤资源包：{error}"))?;
+    enable_local_skin_resource_pack(data_directory)?;
+    Ok(pack_path)
+}
+
+fn enable_local_skin_resource_pack(data_directory: &std::path::Path) -> Result<(), String> {
+    let options_path = data_directory.join("options.txt");
+    let contents = fs::read_to_string(&options_path).unwrap_or_default();
+    let pack_entry = format!("file/{LOCAL_SKIN_PACK_NAME}");
+    let mut lines = Vec::new();
+    let mut found_packs = false;
+    let mut found_incompatible = false;
+    for line in contents.lines() {
+        if let Some(raw) = line.strip_prefix("resourcePacks:") {
+            let mut packs = serde_json::from_str::<Vec<String>>(raw)
+                .unwrap_or_else(|_| vec!["vanilla".to_owned()]);
+            if !packs.iter().any(|pack| pack == &pack_entry) {
+                packs.push(pack_entry.clone());
+            }
+            lines.push(format!(
+                "resourcePacks:{}",
+                serde_json::to_string(&packs).map_err(|error| error.to_string())?
+            ));
+            found_packs = true;
+        } else if let Some(raw) = line.strip_prefix("incompatibleResourcePacks:") {
+            let mut packs = serde_json::from_str::<Vec<String>>(raw).unwrap_or_else(|_| Vec::new());
+            packs.retain(|pack| pack != &pack_entry);
+            lines.push(format!(
+                "incompatibleResourcePacks:{}",
+                serde_json::to_string(&packs).map_err(|error| error.to_string())?
+            ));
+            found_incompatible = true;
+        } else {
+            lines.push(line.to_owned());
+        }
+    }
+    if !found_packs {
+        lines.push(format!(
+            "resourcePacks:{}",
+            serde_json::to_string(&vec!["vanilla", pack_entry.as_str()])
+                .map_err(|error| error.to_string())?
+        ));
+    }
+    if !found_incompatible {
+        lines.push("incompatibleResourcePacks:[]".to_owned());
+    }
+    fs::write(&options_path, format!("{}\n", lines.join("\n")))
+        .map_err(|error| format!("无法启用本地皮肤资源包：{error}"))
+}
+
 fn pick_image_file(save: bool) -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
@@ -14723,13 +15794,24 @@ fn pick_image_file(save: bool) -> Option<PathBuf> {
 }
 
 fn pick_project_directory() -> Option<PathBuf> {
+    pick_directory(
+        &std::env::current_dir().unwrap_or_default(),
+        "选择模组工程保存位置",
+    )
+}
+
+fn pick_directory(default_directory: &std::path::Path, description: &str) -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        let script = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description='选择模组工程保存位置'; $d.ShowNewFolderButton=$true; if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::Out.Write($d.SelectedPath)}";
+        let default_directory = default_directory.to_string_lossy().replace('\'', "''");
+        let description = description.replace('\'', "''");
+        let script = format!(
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description='{description}'; $d.SelectedPath='{default_directory}'; $d.ShowNewFolderButton=$true; if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){{[Console]::Out.Write($d.SelectedPath)}}"
+        );
         let mut command = std::process::Command::new("powershell.exe");
         command
-            .args(["-NoProfile", "-STA", "-Command", script])
+            .args(["-NoProfile", "-STA", "-Command", &script])
             .creation_flags(0x0800_0000);
         let output = command.output().ok()?;
         let selected = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -14737,6 +15819,8 @@ fn pick_project_directory() -> Option<PathBuf> {
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = default_directory;
+        let _ = description;
         None
     }
 }
@@ -15041,16 +16125,18 @@ fn version_content_entries(
                         detail: "存档文件夹".to_owned(),
                     })
                 }
-                VersionContentKind::ShaderPacks | VersionContentKind::ResourcePacks => {
+                VersionContentKind::ShaderPacks
+                | VersionContentKind::ResourcePacks
+                | VersionContentKind::Datapacks => {
                     if path.is_dir() {
                         Some(VersionContentEntry {
                             name,
                             detail: format!(
                                 "{} · 文件夹",
-                                if kind == VersionContentKind::ShaderPacks {
-                                    "光影包"
-                                } else {
-                                    "材质包"
+                                match kind {
+                                    VersionContentKind::ShaderPacks => "光影包",
+                                    VersionContentKind::ResourcePacks => "材质包",
+                                    _ => "数据包",
                                 }
                             ),
                         })
@@ -15635,9 +16721,16 @@ impl Layout {
 }
 
 fn profile_menu_rect(layout: &Layout) -> Rect {
-    let size = Vec2::new(264.0, 218.0);
+    let size = Vec2::new(264.0, 260.0);
     let top = (layout.rail_profile.top() - size.y - 10.0).max(layout.titlebar.bottom() + 10.0);
     Rect::from_min_size(Pos2::new(layout.rail.right() + 12.0, top), size)
+}
+
+fn account_name_dialog_rect(screen: Rect) -> Rect {
+    Rect::from_center_size(
+        screen.center(),
+        Vec2::new(420.0_f32.min(screen.width() - 30.0), 236.0),
+    )
 }
 
 fn version_folder_selector_rect(layout: &Layout) -> Rect {
@@ -15818,6 +16911,7 @@ impl From<NavKind> for NavIcon {
 fn draw_icon(painter: &Painter, icon: NavIcon, rect: Rect, color: Color32) {
     let c = rect.center();
     let s = rect.width().min(rect.height());
+    let color = theme::adaptive_text_color(color);
     let stroke = Stroke::new(1.65, color);
     match icon {
         NavIcon::Home => {
