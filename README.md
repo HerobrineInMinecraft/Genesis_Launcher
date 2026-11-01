@@ -32,7 +32,7 @@
 cargo run --release
 ```
 
-也可以直接运行构建后的 `target\release\wdsjqdq.exe`。
+也可以直接运行构建后的 `target\release\Genesis Launcher.exe`。
 
 正式文件的版本安装与启动前补全使用 Mojang Piston Meta、资源 CDN 和 Java Runtime Manifest。Java 运行时原始文件由 Mojang 的 `piston-data.mojang.com` 提供。所有下载地址都经过官方域名白名单检查和 SHA1 校验。
 

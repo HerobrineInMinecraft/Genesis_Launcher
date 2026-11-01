@@ -106,6 +106,44 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
+    if std::env::args().any(|arg| arg == "--update-report") {
+        match update::fetch_latest_release() {
+            Ok(release) => {
+                println!("update_version={}", release.version);
+                println!("update_name={}", release.name);
+                println!("update_url={}", release.page_url);
+                if let Some(asset) = release.asset.as_ref() {
+                    println!("update_asset={}", asset.name);
+                    println!("update_asset_size={}", asset.size);
+                    println!(
+                        "update_asset_sha256={}",
+                        asset.sha256.as_deref().unwrap_or("")
+                    );
+                }
+                println!(
+                    "update_available={}",
+                    update::is_newer_version(env!("CARGO_PKG_VERSION"), &release.version)
+                );
+            }
+            Err(error) => println!("update_error={error}"),
+        }
+        return Ok(());
+    }
+
+    if std::env::args().any(|arg| arg == "--update-download-report") {
+        match update::fetch_latest_release() {
+            Ok(release) => match release.asset.as_ref() {
+                Some(asset) => match update::download_release_asset_for_report(asset) {
+                    Ok(path) => println!("update_download={}", path.display()),
+                    Err(error) => println!("update_download_error={error}"),
+                },
+                None => println!("update_download_error=release_has_no_windows_asset"),
+            },
+            Err(error) => println!("update_download_error={error}"),
+        }
+        return Ok(());
+    }
+
     if let Some(index) = std::env::args().position(|arg| arg == "--loader-report") {
         let args = std::env::args().collect::<Vec<_>>();
         let game_version = args.get(index + 1).cloned();

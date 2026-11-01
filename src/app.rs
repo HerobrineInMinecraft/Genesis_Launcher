@@ -651,7 +651,6 @@ struct LauncherSettings {
     window_height: u32,
     fullscreen: bool,
     extra_jvm_args: String,
-    check_updates: bool,
     notify_after_launch: bool,
     hide_after_launch: bool,
     animations: bool,
@@ -696,7 +695,6 @@ impl Default for LauncherSettings {
             window_height: 720,
             fullscreen: false,
             extra_jvm_args: String::new(),
-            check_updates: true,
             notify_after_launch: true,
             hide_after_launch: false,
             animations: true,
@@ -783,7 +781,6 @@ impl LauncherSettings {
                 }
                 "fullscreen" => settings.fullscreen = value == "true",
                 "jvm_args" => settings.extra_jvm_args = value.to_owned(),
-                "check_updates" => settings.check_updates = value == "true",
                 "notify_after_launch" => settings.notify_after_launch = value == "true",
                 "hide_after_launch" => settings.hide_after_launch = value == "true",
                 "animations" => settings.animations = value == "true",
@@ -941,7 +938,7 @@ impl LauncherSettings {
             std::fs::create_dir_all(parent)?;
         }
         let mut contents = format!(
-            "memory_mb={}\ngame_directory={}\ngame_directories={}\nversion_isolation={}\njava_path={}\nshow_loader_versions={}\nwindow_width={}\nwindow_height={}\nfullscreen={}\njvm_args={}\ncheck_updates={}\nnotify_after_launch={}\nhide_after_launch={}\nanimations={}\ntooltips={}\nsettings_revision={}\nliquid_glass={}\nliquid_glass_mode={}\nglass_transparency={}\npointer_brightness={}\npointer_radius={}\npointer_refresh_rate={}\n",
+            "memory_mb={}\ngame_directory={}\ngame_directories={}\nversion_isolation={}\njava_path={}\nshow_loader_versions={}\nwindow_width={}\nwindow_height={}\nfullscreen={}\njvm_args={}\nnotify_after_launch={}\nhide_after_launch={}\nanimations={}\ntooltips={}\nsettings_revision={}\nliquid_glass={}\nliquid_glass_mode={}\nglass_transparency={}\npointer_brightness={}\npointer_radius={}\npointer_refresh_rate={}\n",
             self.memory_mb,
             self.game_directory
                 .as_ref()
@@ -962,7 +959,6 @@ impl LauncherSettings {
             self.window_height,
             self.fullscreen,
             self.extra_jvm_args.replace(['\r', '\n'], " "),
-            self.check_updates,
             self.notify_after_launch,
             self.hide_after_launch,
             self.animations,
@@ -1266,6 +1262,11 @@ pub struct LauncherApp {
     launcher_update_result: Option<LauncherRelease>,
     launcher_update_error: Option<String>,
     launcher_update_manual: bool,
+    forced_update_release: Option<LauncherRelease>,
+    forced_update_receiver: Option<std::sync::mpsc::Receiver<update::ForcedUpdateEvent>>,
+    forced_update_progress: f32,
+    forced_update_error: Option<String>,
+    forced_update_installing: bool,
     version_scroll: f32,
     version_page_selected: usize,
     version_page_scroll: f32,
@@ -1535,9 +1536,7 @@ impl LauncherApp {
             .unwrap_or_default();
         let official_manifest = Some(crate::download::start_manifest_fetch());
         let news_receiver = Some(crate::news::start_fetch());
-        let launcher_update_receiver = settings
-            .check_updates
-            .then(|| update::start_latest_release_check(&cc.egui_ctx));
+        let launcher_update_receiver = Some(update::start_latest_release_check(&cc.egui_ctx));
 
         Self {
             selected_version,
@@ -1666,6 +1665,11 @@ impl LauncherApp {
             launcher_update_result: None,
             launcher_update_error: None,
             launcher_update_manual: false,
+            forced_update_release: None,
+            forced_update_receiver: None,
+            forced_update_progress: 0.0,
+            forced_update_error: None,
+            forced_update_installing: false,
             version_scroll: 0.0,
             version_page_selected: selected_version,
             version_page_scroll: (selected_version as f32 * 64.0 - 180.0).max(0.0),
@@ -2892,6 +2896,22 @@ impl LauncherApp {
         ctx.request_repaint();
     }
 
+    fn begin_forced_update(&mut self, release: LauncherRelease, ctx: &egui::Context) {
+        if self.forced_update_release.is_some() {
+            return;
+        }
+        self.forced_update_release = Some(release.clone());
+        self.forced_update_progress = 0.0;
+        self.forced_update_error = None;
+        if let Some(asset) = release.asset {
+            self.forced_update_receiver = Some(update::start_update_download(asset, ctx));
+        } else {
+            self.forced_update_error =
+                Some("新版本 Release 中没有可用的 Windows EXE 文件".to_owned());
+        }
+        ctx.request_repaint();
+    }
+
     fn poll_launcher_update(&mut self, ctx: &egui::Context) {
         let Some(receiver) = self.launcher_update_receiver.take() else {
             return;
@@ -2902,7 +2922,8 @@ impl LauncherApp {
                 self.launcher_update_result = Some(release.clone());
                 self.launcher_update_error = None;
                 if newer {
-                    self.show_toast(format!("发现 Genesis Launcher 新版本 {}", release.version));
+                    self.begin_forced_update(release, ctx);
+                    self.show_toast("检测到新版本，正在强制更新 Genesis Launcher");
                 } else if self.launcher_update_manual {
                     self.show_toast("Genesis Launcher 已是最新版本");
                 }
@@ -2924,6 +2945,53 @@ impl LauncherApp {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.launcher_update_error = Some("更新检查连接已断开".to_owned());
                 self.launcher_update_manual = false;
+            }
+        }
+    }
+
+    fn poll_forced_update(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.forced_update_receiver.take() else {
+            return;
+        };
+        loop {
+            match receiver.try_recv() {
+                Ok(update::ForcedUpdateEvent::Progress { downloaded, total }) => {
+                    if total > 0 {
+                        self.forced_update_progress =
+                            (downloaded as f32 / total as f32).clamp(0.0, 1.0);
+                    }
+                    ctx.request_repaint();
+                }
+                Ok(update::ForcedUpdateEvent::Finished(Ok(path))) => {
+                    let expected = self
+                        .forced_update_release
+                        .as_ref()
+                        .and_then(|release| release.asset.as_ref())
+                        .and_then(|asset| asset.sha256.as_deref());
+                    match update::launch_update_installer(&path, expected) {
+                        Ok(()) => {
+                            self.forced_update_progress = 1.0;
+                            self.forced_update_installing = true;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        Err(error) => self.forced_update_error = Some(error),
+                    }
+                    ctx.request_repaint();
+                    break;
+                }
+                Ok(update::ForcedUpdateEvent::Finished(Err(error))) => {
+                    self.forced_update_error = Some(error);
+                    ctx.request_repaint();
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.forced_update_receiver = Some(receiver);
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.forced_update_error = Some("更新下载连接意外断开".to_owned());
+                    break;
+                }
             }
         }
     }
@@ -3366,6 +3434,7 @@ impl LauncherApp {
 
     fn update_timers(&mut self, ctx: &egui::Context) {
         self.poll_background_tasks(ctx);
+        self.poll_forced_update(ctx);
         self.poll_resource_tasks();
         self.poll_favorite_icons(ctx);
         self.update_popup_animation(ctx);
@@ -3414,6 +3483,8 @@ impl LauncherApp {
             && (self.launch_started.is_some()
                 || self.toast.is_some()
                 || self.news.is_some()
+                || self.launcher_update_receiver.is_some()
+                || self.forced_update_receiver.is_some()
                 || self.menu != Menu::None
                 || self.game_process_id.is_some()
                 || self.news_receiver.is_some()
@@ -3625,6 +3696,12 @@ impl LauncherApp {
             ctx.request_repaint_after(Duration::from_millis(50));
             return;
         }
+        if self.launcher_update_receiver.is_some()
+            && self.started_at.elapsed() < Duration::from_secs(5)
+        {
+            ctx.request_repaint_after(Duration::from_millis(50));
+            return;
+        }
         if self.page == Page::Community
             && self.favorite_icon_receiver.is_some()
             && self.started_at.elapsed() < Duration::from_secs(8)
@@ -3727,6 +3804,12 @@ impl LauncherApp {
             self.started_at.elapsed().as_secs_f64()
         };
         let painter = ui.painter().clone();
+        if self.forced_update_release.is_some() {
+            painter.rect_filled(screen, 0, theme::BG);
+            paint_ambient_background(&painter, screen, time);
+            self.paint_forced_update(ctx, ui, screen, time);
+            return;
+        }
         let mut layout = Layout::new(screen);
         let version_label = self.version_selector_label(self.version());
         let max_trigger_width = (screen.width() * 0.34).clamp(220.0, 380.0);
@@ -11322,15 +11405,13 @@ impl LauncherApp {
             SettingsSection::General => {
                 let row = setting_row(row_y, row_gap);
                 paint_setting_card(painter, row, time);
-                paint_toggle_row(
-                    ui,
+                paint_setting_label(
                     painter,
                     row,
-                    "setting-check-updates",
-                    "启动时检查更新",
-                    "启动器打开时检查版本与组件更新",
-                    &mut self.settings.check_updates,
+                    "强制自动更新",
+                    "检测到新版本后自动下载、校验、替换并重新启动",
                 );
+                paint_status_badge(painter, row, "强制开启");
                 row_y += row_gap;
                 let row = setting_row(row_y, row_gap);
                 paint_setting_card(painter, row, time);
@@ -12569,6 +12650,142 @@ impl LauncherApp {
 
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.news = None;
+        }
+    }
+
+    fn paint_forced_update(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        screen: Rect,
+        time: f64,
+    ) {
+        let Some(release) = self.forced_update_release.as_ref() else {
+            return;
+        };
+        let painter = ui.painter().clone();
+        painter.rect_filled(screen, 0, Color32::from_black_alpha(150));
+        let card = Rect::from_center_size(
+            screen.center(),
+            Vec2::new(520.0_f32.min(screen.width() - 40.0), 286.0),
+        );
+        theme::glass_panel(
+            &painter,
+            card,
+            theme::RADIUS,
+            theme::GlassSpec::new(Color32::from_rgb(20, 32, 24), theme::GREEN, time, 21.0)
+                .backdrop_blur(24.0),
+        );
+        let content = card_clip(&painter, card);
+        theme::soft_orb(
+            &content,
+            Pos2::new(card.left() + 72.0, card.top() + 62.0),
+            72.0,
+            theme::GREEN,
+            18,
+        );
+        let icon = Rect::from_center_size(
+            Pos2::new(card.left() + 72.0, card.top() + 62.0),
+            Vec2::splat(52.0),
+        );
+        draw_icon(&content, NavIcon::Sparkles, icon, theme::GREEN_BRIGHT);
+        theme::bold_text(
+            &content,
+            Pos2::new(card.left() + 126.0, card.top() + 30.0),
+            "Genesis Launcher 强制更新",
+            19.0,
+            theme::INK,
+        );
+        theme::text(
+            &content,
+            Pos2::new(card.left() + 127.0, card.top() + 63.0),
+            format!(
+                "当前 v{}  →  最新 v{}",
+                env!("CARGO_PKG_VERSION"),
+                release.version
+            ),
+            9.2,
+            theme::MUTED,
+        );
+        theme::text(
+            &content,
+            Pos2::new(card.left() + 127.0, card.top() + 84.0),
+            "检测到新版本后将自动下载、替换并重新启动，无法跳过",
+            8.3,
+            theme::INK_SOFT,
+        );
+        let track = Rect::from_min_size(
+            Pos2::new(card.left() + 30.0, card.top() + 139.0),
+            Vec2::new(card.width() - 60.0, 11.0),
+        );
+        theme::fill_round(&content, track, theme::RADIUS, theme::white_alpha(18));
+        if self.forced_update_progress > 0.0 {
+            theme::fill_round(
+                &content,
+                Rect::from_min_size(
+                    track.left_top(),
+                    Vec2::new(
+                        track.width() * self.forced_update_progress.clamp(0.0, 1.0),
+                        track.height(),
+                    ),
+                ),
+                theme::RADIUS,
+                theme::GREEN_BRIGHT,
+            );
+        }
+        let percent = (self.forced_update_progress * 100.0).round() as u32;
+        let status = if self.forced_update_installing {
+            "下载完成，正在关闭并重新启动…".to_owned()
+        } else if let Some(error) = self.forced_update_error.as_ref() {
+            format!("更新失败：{error}")
+        } else {
+            format!("正在下载更新 · {percent}%")
+        };
+        theme::text(
+            &content,
+            Pos2::new(card.left() + 30.0, card.top() + 161.0),
+            fit_text_to_width(&content, &status, theme::font(8.5), card.width() - 60.0),
+            8.5,
+            if self.forced_update_error.is_some() {
+                Color32::from_rgb(221, 170, 91)
+            } else {
+                theme::GREEN_BRIGHT
+            },
+        );
+        if self.forced_update_error.is_some() && !self.forced_update_installing {
+            let retry = Rect::from_center_size(
+                Pos2::new(card.center().x, card.bottom() - 52.0),
+                Vec2::new(150.0, 38.0),
+            );
+            if settings_button(
+                ui,
+                &content,
+                retry,
+                "forced-update-retry",
+                "重试强制更新",
+                true,
+            ) {
+                if let Some(release) = self.forced_update_release.as_ref()
+                    && let Some(asset) = release.asset.clone()
+                {
+                    self.forced_update_error = None;
+                    self.forced_update_progress = 0.0;
+                    self.forced_update_receiver = Some(update::start_update_download(asset, ctx));
+                    ctx.request_repaint();
+                } else {
+                    self.forced_update_release = None;
+                    self.start_launcher_update_check(ctx, true);
+                }
+            }
+        } else {
+            theme::center_text(
+                &content,
+                Pos2::new(card.center().x, card.bottom() - 43.0),
+                "更新完成后将自动重新打开启动器",
+                8.1,
+                theme::MUTED,
+                false,
+            );
         }
     }
 
