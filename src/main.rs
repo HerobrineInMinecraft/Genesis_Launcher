@@ -12,6 +12,7 @@ mod resources;
 mod scene;
 mod sessions;
 mod theme;
+mod update;
 mod vector;
 
 use app::LauncherApp;

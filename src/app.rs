@@ -19,6 +19,7 @@ use crate::resources::{ResourceCategory, ResourceProject};
 use crate::scene;
 use crate::sessions::{RecentSession, SessionKind};
 use crate::theme;
+use crate::update::{self, LauncherRelease};
 use crate::vector;
 
 const TITLEBAR_HEIGHT: f32 = 42.0;
@@ -1261,6 +1262,10 @@ pub struct LauncherApp {
     news_error: Option<String>,
     news_textures: Vec<Option<egui::TextureHandle>>,
     news_texture_keys: Vec<Option<String>>,
+    launcher_update_receiver: Option<std::sync::mpsc::Receiver<Result<LauncherRelease, String>>>,
+    launcher_update_result: Option<LauncherRelease>,
+    launcher_update_error: Option<String>,
+    launcher_update_manual: bool,
     version_scroll: f32,
     version_page_selected: usize,
     version_page_scroll: f32,
@@ -1530,6 +1535,9 @@ impl LauncherApp {
             .unwrap_or_default();
         let official_manifest = Some(crate::download::start_manifest_fetch());
         let news_receiver = Some(crate::news::start_fetch());
+        let launcher_update_receiver = settings
+            .check_updates
+            .then(|| update::start_latest_release_check(&cc.egui_ctx));
 
         Self {
             selected_version,
@@ -1654,6 +1662,10 @@ impl LauncherApp {
             news_error: None,
             news_textures: Vec::new(),
             news_texture_keys: Vec::new(),
+            launcher_update_receiver,
+            launcher_update_result: None,
+            launcher_update_error: None,
+            launcher_update_manual: false,
             version_scroll: 0.0,
             version_page_selected: selected_version,
             version_page_scroll: (selected_version as f32 * 64.0 - 180.0).max(0.0),
@@ -2866,6 +2878,56 @@ impl LauncherApp {
         }
     }
 
+    fn start_launcher_update_check(&mut self, ctx: &egui::Context, manual: bool) {
+        if self.launcher_update_receiver.is_some() {
+            if manual {
+                self.show_toast("正在检查 Genesis Launcher 更新");
+            }
+            return;
+        }
+        self.launcher_update_manual = manual;
+        self.launcher_update_error = None;
+        self.launcher_update_result = None;
+        self.launcher_update_receiver = Some(update::start_latest_release_check(ctx));
+        ctx.request_repaint();
+    }
+
+    fn poll_launcher_update(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.launcher_update_receiver.take() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok(release)) => {
+                let newer = update::is_newer_version(env!("CARGO_PKG_VERSION"), &release.version);
+                self.launcher_update_result = Some(release.clone());
+                self.launcher_update_error = None;
+                if newer {
+                    self.show_toast(format!("发现 Genesis Launcher 新版本 {}", release.version));
+                } else if self.launcher_update_manual {
+                    self.show_toast("Genesis Launcher 已是最新版本");
+                }
+                self.launcher_update_manual = false;
+                ctx.request_repaint();
+            }
+            Ok(Err(error)) => {
+                self.launcher_update_error = Some(error.clone());
+                self.launcher_update_result = None;
+                if self.launcher_update_manual {
+                    self.show_toast(format!("检查更新失败：{error}"));
+                }
+                self.launcher_update_manual = false;
+                ctx.request_repaint();
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.launcher_update_receiver = Some(receiver);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.launcher_update_error = Some("更新检查连接已断开".to_owned());
+                self.launcher_update_manual = false;
+            }
+        }
+    }
+
     fn start_version_install(&mut self, version_id: String, loader: &str, launch_after: bool) {
         if self.install_receiver.is_some() {
             self.show_toast("已有安装任务正在运行");
@@ -3169,6 +3231,7 @@ impl LauncherApp {
     fn poll_background_tasks(&mut self, ctx: &egui::Context) {
         self.poll_loader_tasks(ctx);
         self.poll_modpack_import(ctx);
+        self.poll_launcher_update(ctx);
         if let Some(receiver) = self.news_receiver.take() {
             match receiver.try_recv() {
                 Ok(Ok(news)) => {
@@ -11280,6 +11343,69 @@ impl LauncherApp {
                     "游戏进程接管后显示桌面提示",
                     &mut self.settings.notify_after_launch,
                 );
+                row_y += row_gap;
+                let row = setting_row(row_y, row_gap);
+                paint_setting_card(painter, row, time);
+                let current_version = env!("CARGO_PKG_VERSION");
+                let available = self.launcher_update_result.as_ref().is_some_and(|release| {
+                    update::is_newer_version(current_version, &release.version)
+                });
+                let description = if self.launcher_update_receiver.is_some() {
+                    "正在从 GitHub Releases 检查最新版本".to_owned()
+                } else if let Some(release) = self.launcher_update_result.as_ref() {
+                    if available {
+                        format!("发现新版本 v{} · 当前 v{current_version}", release.version)
+                    } else {
+                        format!("已是最新版本 · 当前 v{current_version}")
+                    }
+                } else if let Some(error) = self.launcher_update_error.as_ref() {
+                    ellipsize_end(&format!("检查失败 · {error}"), 56)
+                } else {
+                    format!("检查 Genesis Launcher 的 GitHub Releases · 当前 v{current_version}")
+                };
+                paint_setting_label(painter, row, "启动器更新", &description);
+                let release_button = Rect::from_min_size(
+                    Pos2::new(
+                        row.right() - SETTING_CARD_PADDING_X - 88.0,
+                        row.top() + 16.0,
+                    ),
+                    Vec2::new(88.0, 34.0),
+                );
+                let check_button = Rect::from_min_size(
+                    Pos2::new(release_button.left() - 90.0, row.top() + 16.0),
+                    Vec2::new(82.0, 34.0),
+                );
+                if settings_button(
+                    ui,
+                    painter,
+                    check_button,
+                    "launcher-update-check",
+                    "检查更新",
+                    false,
+                ) {
+                    self.start_launcher_update_check(ui.ctx(), true);
+                }
+                if settings_button(
+                    ui,
+                    painter,
+                    release_button,
+                    "launcher-update-page",
+                    if available {
+                        "打开更新"
+                    } else {
+                        "发布页"
+                    },
+                    available,
+                ) {
+                    let page_url = self
+                        .launcher_update_result
+                        .as_ref()
+                        .map(|release| release.page_url.as_str())
+                        .unwrap_or(update::RELEASES_URL);
+                    if let Err(error) = crate::favorites::open_site(page_url) {
+                        self.show_toast(format!("无法打开更新页面：{error}"));
+                    }
+                }
             }
             SettingsSection::Game => {
                 let row = setting_row(row_y, row_gap);
