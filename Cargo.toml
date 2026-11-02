@@ -1,23 +1,39 @@
 [package]
+# crate 名用于 Cargo 命令、二进制输出和诊断信息。
 name = "genesis-launcher"
+# 启动器版本号同时参与发行版本比较与更新检查。
 version = "1.0.0"
+# 使用 Rust 2024 edition 的语言规则和宏解析行为。
 edition = "2024"
+# Cargo 元数据中的产品描述。
 description = "Genesis Launcher, a native Minecraft desktop launcher"
 
 [dependencies]
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "system_fonts"] }
+# 原生 egui/eframe 界面栈；仅启用 OpenGL(glow) 与字体能力，避免引入 WebView。
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wgpu", "system_fonts"] }
+# NBT 解压等流程使用的 DEFLATE 实现。
 flate2 = "1"
+# 皮肤、图标和背景图片的解码能力。
 image = { version = "0.25", default-features = false, features = ["ico", "jpeg", "png", "webp"] }
+# 清单、设置兼容文件和网络 API 响应解析。
 serde_json = "1"
+# Minecraft 文件与整合包资源的 SHA-1 校验。
 sha1_smol = "1"
+# Modrinth 整合包导出等流程需要的 SHA-256/SHA-512 摘要。
+sha2 = "0.10"
+# 非 WinHTTP 平台使用的 HTTP 客户端，支持 gzip 与 TLS。
 ureq = { version = "2.12", default-features = false, features = ["gzip", "tls"] }
+# 整合包读取、皮肤资源包和导出归档使用的 ZIP 实现。
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Networking_WinHttp", "Win32_System_Threading", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+# 仅 Windows 启用的 Win32 API：DWM 圆角、WinHTTP、DPI、窗口控制与进程检查。
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Networking_WinHttp", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.dev]
+# 开发构建保留优化，避免高 DPI 矢量界面和图片处理在调试时明显卡顿。
 opt-level = 2
 
 [profile.dev.package."*"]
+# 第三方依赖使用更高优化等级，减少调试运行时的渲染与网络开销。
 opt-level = 3
