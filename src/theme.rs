@@ -7,20 +7,14 @@ use eframe::egui::{
 };
 use eframe::glow::HasContext;
 
-pub const BG: Color32 = Color32::from_rgb(10, 15, 12);
-pub const SURFACE: Color32 = Color32::from_rgb(17, 24, 19);
-pub const INK: Color32 = Color32::from_rgb(241, 247, 235);
-pub const INK_SOFT: Color32 = Color32::from_rgb(208, 218, 206);
-pub const MUTED: Color32 = Color32::from_rgb(143, 158, 146);
 pub const GREEN: Color32 = Color32::from_rgb(100, 216, 92);
 pub const GREEN_BRIGHT: Color32 = Color32::from_rgb(155, 242, 130);
-pub const LINE: Color32 = Color32::from_rgba_premultiplied(23, 24, 22, 26);
-pub const LINE_STRONG: Color32 = Color32::from_rgba_premultiplied(37, 40, 36, 43);
 pub const RADIUS: u8 = 16;
 
 const BOLD_FAMILY: &str = "launcher-bold";
 
 static GLASS_TRANSPARENCY: AtomicU16 = AtomicU16::new(82);
+static CARD_EDGE_CLARITY: AtomicU16 = AtomicU16::new(55);
 static POINTER_BRIGHTNESS: AtomicU16 = AtomicU16::new(100);
 static POINTER_RADIUS: AtomicU16 = AtomicU16::new(155);
 static APPEARANCE_MODE: AtomicU8 = AtomicU8::new(AppearanceMode::Simple as u8);
@@ -45,8 +39,7 @@ impl AppearanceMode {
     pub fn from_stored(value: &str) -> Option<Self> {
         match value {
             "simple" => Some(Self::Simple),
-            "frosted" => Some(Self::Frosted),
-            "liquid" | "clear" | "regular" => Some(Self::Liquid),
+            "frosted" | "liquid" | "clear" | "regular" => Some(Self::Frosted),
             _ => None,
         }
     }
@@ -63,11 +56,13 @@ impl AppearanceMode {
 pub fn configure_effects(
     ctx: &egui::Context,
     glass_transparency: u16,
+    card_edge_clarity: u16,
     pointer_brightness: u16,
     pointer_radius: u16,
     appearance_mode: AppearanceMode,
 ) {
     GLASS_TRANSPARENCY.store(glass_transparency.clamp(0, 100), Ordering::Relaxed);
+    CARD_EDGE_CLARITY.store(card_edge_clarity.clamp(0, 100), Ordering::Relaxed);
     POINTER_BRIGHTNESS.store(pointer_brightness.min(200), Ordering::Relaxed);
     POINTER_RADIUS.store(pointer_radius.clamp(20, 400), Ordering::Relaxed);
     let previous = APPEARANCE_MODE.swap(appearance_mode as u8, Ordering::Relaxed);
@@ -83,6 +78,10 @@ fn glass_tint_strength() -> f32 {
 
 fn glass_alpha() -> f32 {
     glass_alpha_for(GLASS_TRANSPARENCY.load(Ordering::Relaxed))
+}
+
+fn card_edge_clarity() -> f32 {
+    CARD_EDGE_CLARITY.load(Ordering::Relaxed) as f32 / 100.0
 }
 
 fn glass_alpha_for(transparency: u16) -> f32 {
@@ -103,76 +102,36 @@ pub fn appearance_mode() -> AppearanceMode {
 }
 
 pub fn background() -> Color32 {
-    if appearance_mode() == AppearanceMode::Simple {
-        Color32::from_rgb(247, 248, 245)
-    } else {
-        BG
-    }
+    Color32::from_rgb(255, 255, 255)
 }
 
 pub fn ink() -> Color32 {
-    if appearance_mode() == AppearanceMode::Simple {
-        Color32::from_rgb(24, 27, 24)
-    } else {
-        INK
-    }
+    Color32::from_rgb(24, 27, 24)
 }
 
 pub fn ink_soft() -> Color32 {
-    if appearance_mode() == AppearanceMode::Simple {
-        Color32::from_rgb(52, 57, 52)
-    } else {
-        INK_SOFT
-    }
+    Color32::from_rgb(52, 57, 52)
 }
 
 pub fn muted() -> Color32 {
-    if appearance_mode() == AppearanceMode::Simple {
-        Color32::from_rgb(104, 111, 104)
-    } else {
-        MUTED
-    }
+    Color32::from_rgb(104, 111, 104)
 }
 
 pub fn line() -> Color32 {
-    if appearance_mode() == AppearanceMode::Simple {
-        Color32::from_black_alpha(25)
-    } else {
-        LINE
-    }
+    Color32::from_black_alpha(25)
 }
 
 pub fn line_strong() -> Color32 {
-    if appearance_mode() == AppearanceMode::Simple {
-        Color32::from_black_alpha(44)
-    } else {
-        LINE_STRONG
-    }
+    Color32::from_black_alpha(44)
 }
 
-fn apply_context_visuals(ctx: &egui::Context, mode: AppearanceMode) {
-    let mut visuals = if mode == AppearanceMode::Simple {
-        egui::Visuals::light()
-    } else {
-        egui::Visuals::dark()
-    };
+fn apply_context_visuals(ctx: &egui::Context, _mode: AppearanceMode) {
+    let mut visuals = egui::Visuals::light();
     visuals.panel_fill = background();
-    visuals.window_fill = if mode == AppearanceMode::Simple {
-        Color32::WHITE
-    } else {
-        SURFACE
-    };
-    visuals.extreme_bg_color = if mode == AppearanceMode::Simple {
-        Color32::from_rgb(238, 240, 237)
-    } else {
-        Color32::from_rgb(8, 12, 9)
-    };
+    visuals.window_fill = Color32::WHITE;
+    visuals.extreme_bg_color = Color32::from_rgb(238, 240, 237);
     visuals.override_text_color = Some(ink());
-    visuals.selection.bg_fill = if mode == AppearanceMode::Simple {
-        Color32::from_rgba_unmultiplied(61, 150, 70, 74)
-    } else {
-        Color32::from_rgba_premultiplied(92, 92, 80, 115)
-    };
+    visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(61, 150, 70, 74);
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, line());
     ctx.set_visuals(visuals);
 }
@@ -211,28 +170,12 @@ pub fn setup(ctx: &egui::Context) {
 
     ctx.set_fonts(fonts);
 
-    let mut visuals = if appearance_mode() == AppearanceMode::Simple {
-        egui::Visuals::light()
-    } else {
-        egui::Visuals::dark()
-    };
+    let mut visuals = egui::Visuals::light();
     visuals.panel_fill = background();
-    visuals.window_fill = if appearance_mode() == AppearanceMode::Simple {
-        Color32::WHITE
-    } else {
-        SURFACE
-    };
-    visuals.extreme_bg_color = if appearance_mode() == AppearanceMode::Simple {
-        Color32::from_rgb(238, 240, 237)
-    } else {
-        Color32::from_rgb(8, 12, 9)
-    };
+    visuals.window_fill = Color32::WHITE;
+    visuals.extreme_bg_color = Color32::from_rgb(238, 240, 237);
     visuals.override_text_color = Some(ink());
-    visuals.selection.bg_fill = if appearance_mode() == AppearanceMode::Simple {
-        Color32::from_rgba_unmultiplied(61, 150, 70, 74)
-    } else {
-        Color32::from_rgba_premultiplied(92, 92, 80, 115)
-    };
+    visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(61, 150, 70, 74);
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, line());
     ctx.set_visuals(visuals);
 
@@ -301,11 +244,7 @@ pub fn black_alpha(alpha: u8) -> Color32 {
 }
 
 pub fn white_alpha(alpha: u8) -> Color32 {
-    if appearance_mode() == AppearanceMode::Simple {
-        Color32::from_black_alpha(alpha)
-    } else {
-        Color32::from_white_alpha(alpha)
-    }
+    Color32::from_black_alpha(alpha)
 }
 
 pub fn fill_round(painter: &Painter, rect: Rect, radius: u8, color: Color32) {
@@ -322,9 +261,6 @@ pub fn stroke_round(painter: &Painter, rect: Rect, radius: u8, width: f32, color
 }
 
 fn surface_color(color: Color32) -> Color32 {
-    if appearance_mode() != AppearanceMode::Simple {
-        return color;
-    }
     let [r, g, b, a] = color.to_array();
     let luminance = r as f32 * 0.2126 + g as f32 * 0.7152 + b as f32 * 0.0722;
     if a > 0 && luminance < 85.0 {
@@ -335,9 +271,6 @@ fn surface_color(color: Color32) -> Color32 {
 }
 
 fn stroke_color(color: Color32) -> Color32 {
-    if appearance_mode() != AppearanceMode::Simple {
-        return color;
-    }
     let [r, g, b, a] = color.to_array();
     let luminance = r as f32 * 0.2126 + g as f32 * 0.7152 + b as f32 * 0.0722;
     if luminance > 145.0 {
@@ -348,9 +281,6 @@ fn stroke_color(color: Color32) -> Color32 {
 }
 
 pub fn adaptive_text_color(color: Color32) -> Color32 {
-    if appearance_mode() != AppearanceMode::Simple {
-        return color;
-    }
     let [r, g, b, a] = color.to_array();
     if a == 0 {
         return color;
@@ -836,8 +766,8 @@ void main() {
     }
 
     vec2 uv = gl_FragCoord.xy / u_screen;
-    float blur_radius = max(2.2, u_blur_radius) + lens * lens * (2.5 + u_hover * 2.0 + u_liquid * 6.0);
-    vec2 refraction = normal * lens * lens * (2.0 + u_hover * 2.0 + u_liquid * 20.0) / u_screen;
+    float blur_radius = max(2.2, u_blur_radius) + lens * lens * (1.5 + u_hover * 1.0 + u_liquid * 9.0);
+    vec2 refraction = normal * lens * lens * (20.0 + u_hover * 5.0) * u_liquid / u_screen;
     vec2 sampled_uv = clamp(uv + refraction, vec2(0.0), vec2(1.0));
     vec3 backdrop = u_blur_radius > 6.0
         ? gaussian_blur(sampled_uv, blur_radius)
@@ -872,21 +802,18 @@ void main() {
     float pointer_sigma = max(20.0, u_pointer_radius);
     float pointer_light = exp(-dot(pointer_delta, pointer_delta) / (2.0 * pointer_sigma * pointer_sigma));
     pointer_light *= u_pointer_active * u_pointer_brightness;
-    color += vec3(0.40, 0.88, 0.53) * pointer_light * (0.04 + lens * 0.06 * u_liquid);
+    color += vec3(0.40, 0.88, 0.53) * pointer_light * (lens * 0.06 * u_liquid);
     color += vec3(1.0, 1.0, 0.96) * pointer_light * 0.015 * u_liquid;
 
     vec2 border_delta = gl_FragCoord.xy - u_pointer;
     float border_sigma = pointer_sigma * 0.68;
     float pointer_border = exp(-dot(border_delta, border_delta) / (2.0 * border_sigma * border_sigma));
     pointer_border *= inner_rim * u_pointer_active * u_pointer_brightness;
-    color += vec3(1.0, 1.0, 0.98) * pointer_border * (0.08 + u_hover * 0.04 + u_liquid * 0.22);
+    color += vec3(1.0, 1.0, 0.98) * pointer_border * (u_liquid * 0.30);
     color += u_accent * pointer_border * 0.16 * u_liquid;
 
     float bottom_edge = smoothstep(0.15, 1.0, -normalized.y) * lens;
     color *= 1.0 - bottom_edge * 0.035;
-    float outer_line = 1.0 - smoothstep(-1.8, 0.0, distance_to_edge);
-    color += vec3(1.0) * outer_line * (0.12 + u_hover * 0.045);
-
     frag_color = vec4(color, mask * u_glass_alpha * mix(1.0, 0.84, u_liquid));
 }
 "#;
@@ -1053,7 +980,7 @@ impl GlassSpec {
 
 pub fn glass_panel(painter: &Painter, rect: Rect, radius: u8, spec: GlassSpec) {
     let GlassSpec {
-        tint,
+        tint: requested_tint,
         accent,
         time,
         hovered,
@@ -1071,33 +998,17 @@ pub fn glass_panel(painter: &Painter, rect: Rect, radius: u8, spec: GlassSpec) {
                 Color32::from_rgb(252, 253, 251)
             },
         );
-        stroke_round(
-            painter,
-            rect,
-            radius,
-            1.0,
-            Color32::from_rgba_unmultiplied(23, 28, 24, 34),
-        );
+        paint_card_edge(painter, rect, radius);
         return;
     }
-    let lift = if hovered { 1.4 } else { 0.0 };
-    let shadow_offset = egui::vec2(0.0, 2.0 + lift);
-    for (spread, width, opacity) in [
-        (2.0, 5.0, 6_u8),
-        (6.0, 9.0, 5),
-        (13.0, 12.0, 4),
-        (23.0, 14.0, 3),
-    ] {
-        painter.rect_stroke(
-            rect.expand(spread).translate(shadow_offset),
-            radius.saturating_add(spread as u8),
-            Stroke::new(width, black_alpha(opacity)),
-            StrokeKind::Outside,
-        );
-    }
-
+    let tint = if matches!(mode, AppearanceMode::Frosted | AppearanceMode::Liquid) {
+        Color32::from_rgb(244, 247, 243)
+    } else {
+        requested_tint
+    };
     let pointer = painter.ctx().input(|input| input.pointer.hover_pos());
-    let liquid = mode == AppearanceMode::Liquid;
+    let frosted = mode == AppearanceMode::Frosted;
+    let enhanced_liquid = mode == AppearanceMode::Liquid;
     let uniforms = GlassUniforms {
         tint: color_rgb(tint),
         accent: color_rgb(accent),
@@ -1107,21 +1018,23 @@ pub fn glass_panel(painter: &Painter, rect: Rect, radius: u8, spec: GlassSpec) {
             .map(|position| [position.x, position.y])
             .unwrap_or([-10_000.0, -10_000.0]),
         pointer_active: if pointer.is_some() { 1.0 } else { 0.0 },
-        blur_radius: if liquid {
+        blur_radius: if frosted {
+            blur_radius.max(12.0)
+        } else if enhanced_liquid {
             blur_radius.max(3.0)
         } else {
             blur_radius.max(8.0)
         },
-        tint_strength: glass_tint_strength() * if liquid { 0.46 } else { 0.82 },
+        tint_strength: glass_tint_strength() * if enhanced_liquid { 0.46 } else { 0.78 },
         pointer_brightness: pointer_brightness(),
         pointer_radius: pointer_radius(),
-        glass_alpha: if liquid {
+        glass_alpha: if enhanced_liquid {
             (glass_alpha() - 0.10).max(0.40)
         } else {
-            glass_alpha().max(0.62)
+            glass_alpha().max(0.68)
         },
         clear: 0.0,
-        liquid: if liquid { 1.0 } else { 0.0 },
+        liquid: if enhanced_liquid { 1.0 } else { 0.0 },
     };
     let shader_drawn = rect.width() >= 120.0
         && rect.height() >= 34.0
@@ -1133,7 +1046,7 @@ pub fn glass_panel(painter: &Painter, rect: Rect, radius: u8, spec: GlassSpec) {
         let transparency = GLASS_TRANSPARENCY.load(Ordering::Relaxed) as f32;
         let mut alpha = (120.0 - transparency * 0.55 + if compact { 25.0 } else { 0.0 })
             .clamp(52.0, 128.0) as u8;
-        if liquid {
+        if enhanced_liquid {
             alpha = ((alpha as f32) * 0.70).max(34.0) as u8;
         }
         fill_round(
@@ -1142,7 +1055,7 @@ pub fn glass_panel(painter: &Painter, rect: Rect, radius: u8, spec: GlassSpec) {
             radius,
             Color32::from_rgba_unmultiplied(r, g, b, alpha),
         );
-        if liquid {
+        if enhanced_liquid {
             let top_height = (rect.height() * 0.50).min(96.0);
             painter.rect_filled(
                 Rect::from_min_size(rect.left_top(), Vec2::new(rect.width(), top_height)),
@@ -1152,28 +1065,28 @@ pub fn glass_panel(painter: &Painter, rect: Rect, radius: u8, spec: GlassSpec) {
                     sw: 0,
                     se: 0,
                 },
-                white_alpha(if hovered { 12 } else { 8 }),
+                Color32::from_white_alpha(if hovered { 36 } else { 24 }),
             );
         }
     }
 
-    if liquid {
+    if enhanced_liquid {
         fill_round(painter, rect, radius, black_alpha(14));
     }
+    paint_card_edge(painter, rect, radius);
+}
 
-    stroke_round(
-        painter,
+fn paint_card_edge(painter: &Painter, rect: Rect, radius: u8) {
+    let clarity = card_edge_clarity();
+    if clarity <= 0.001 {
+        return;
+    }
+    let alpha = (clarity * 72.0).round().clamp(1.0, 72.0) as u8;
+    painter.rect_stroke(
         rect,
         radius,
-        0.9,
-        white_alpha(if hovered { 46 } else { 32 }),
-    );
-    stroke_round(
-        painter,
-        rect.shrink(1.8),
-        radius.saturating_sub(2),
-        1.0,
-        black_alpha(20),
+        Stroke::new(1.0, black_alpha(alpha)),
+        StrokeKind::Inside,
     );
 }
 

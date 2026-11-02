@@ -547,7 +547,7 @@ pub fn paint_news_art(painter: &Painter, rect: Rect, kind: NewsArt, time: f64) {
     clip.rect_stroke(
         rect,
         theme::RADIUS,
-        Stroke::new(1.0, theme::LINE),
+        Stroke::new(1.0, theme::line()),
         StrokeKind::Inside,
     );
 }

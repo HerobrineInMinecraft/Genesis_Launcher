@@ -705,6 +705,7 @@ struct LauncherSettings {
     tooltips: bool,
     appearance_mode: theme::AppearanceMode,
     glass_transparency: u16,
+    card_edge_clarity: u16,
     pointer_brightness: u16,
     pointer_radius: u16,
     pointer_refresh_rate: u16,
@@ -736,6 +737,7 @@ impl Default for LauncherSettings {
             tooltips: true,
             appearance_mode: theme::AppearanceMode::Simple,
             glass_transparency: 82,
+            card_edge_clarity: 55,
             pointer_brightness: 100,
             pointer_radius: 155,
             pointer_refresh_rate: 60,
@@ -748,6 +750,10 @@ impl Default for LauncherSettings {
 impl LauncherSettings {
     fn load() -> Self {
         let mut settings = Self::default();
+        let recovered_skin = brand::data_directory().join("player-skin.png");
+        if recovered_skin.is_file() {
+            settings.player_skin = Some(recovered_skin);
+        }
         let current_path = settings_path();
         let legacy_path = legacy_settings_path();
         let (load_path, migrate_to_current) = if current_path.is_file() {
@@ -859,6 +865,9 @@ impl LauncherSettings {
                     settings.glass_transparency =
                         value.parse().unwrap_or(settings.glass_transparency)
                 }
+                "card_edge_clarity" => {
+                    settings.card_edge_clarity = value.parse().unwrap_or(settings.card_edge_clarity)
+                }
                 "pointer_brightness" => {
                     settings.pointer_brightness =
                         value.parse().unwrap_or(settings.pointer_brightness)
@@ -904,6 +913,7 @@ impl LauncherSettings {
         settings.window_width = settings.window_width.clamp(640, 7680);
         settings.window_height = settings.window_height.clamp(360, 4320);
         settings.glass_transparency = settings.glass_transparency.clamp(20, 100);
+        settings.card_edge_clarity = settings.card_edge_clarity.clamp(0, 100);
         settings.pointer_brightness = settings.pointer_brightness.clamp(0, 200);
         settings.pointer_radius = settings.pointer_radius.clamp(40, 320);
         settings.pointer_refresh_rate = settings.pointer_refresh_rate.clamp(20, 144);
@@ -1010,7 +1020,7 @@ impl LauncherSettings {
             std::fs::create_dir_all(parent)?;
         }
         let mut contents = format!(
-            "memory_mb={}\ngame_directory={}\ngame_directories={}\nversion_isolation={}\njava_path={}\nshow_loader_versions={}\nwindow_width={}\nwindow_height={}\nfullscreen={}\njvm_args={}\nplayer_name={}\nplayer_skin={}\nplayer_skin_model_alex={}\nnotify_after_launch={}\nhide_after_launch={}\nanimation_level={}\ntooltips={}\nsettings_revision={}\nappearance_mode={}\nglass_transparency={}\npointer_brightness={}\npointer_radius={}\npointer_refresh_rate={}\n",
+            "memory_mb={}\ngame_directory={}\ngame_directories={}\nversion_isolation={}\njava_path={}\nshow_loader_versions={}\nwindow_width={}\nwindow_height={}\nfullscreen={}\njvm_args={}\nplayer_name={}\nplayer_skin={}\nplayer_skin_model_alex={}\nnotify_after_launch={}\nhide_after_launch={}\nanimation_level={}\ntooltips={}\nsettings_revision={}\nappearance_mode={}\nglass_transparency={}\ncard_edge_clarity={}\npointer_brightness={}\npointer_radius={}\npointer_refresh_rate={}\n",
             self.memory_mb,
             self.game_directory
                 .as_ref()
@@ -1045,9 +1055,10 @@ impl LauncherSettings {
             match self.appearance_mode {
                 theme::AppearanceMode::Simple => "simple",
                 theme::AppearanceMode::Frosted => "frosted",
-                theme::AppearanceMode::Liquid => "liquid",
+                theme::AppearanceMode::Liquid => "frosted",
             },
             self.glass_transparency,
+            self.card_edge_clarity,
             self.pointer_brightness,
             self.pointer_radius,
             self.pointer_refresh_rate
@@ -1084,11 +1095,15 @@ fn resolve_appearance_mode(
     legacy_style: Option<&str>,
 ) -> theme::AppearanceMode {
     if let Some(mode) = stored_mode {
-        return mode;
+        return if mode == theme::AppearanceMode::Liquid {
+            theme::AppearanceMode::Frosted
+        } else {
+            mode
+        };
     }
     match legacy_enabled {
         Some(true) if legacy_style.is_some_and(|style| style.eq_ignore_ascii_case("clear")) => {
-            theme::AppearanceMode::Liquid
+            theme::AppearanceMode::Frosted
         }
         Some(true) => theme::AppearanceMode::Frosted,
         Some(false) => theme::AppearanceMode::Simple,
@@ -1256,7 +1271,7 @@ pub struct LauncherApp {
     screenshot_requested: bool,
     window_rounded: bool,
     game_process_id: Option<u32>,
-    launch_without_recent: bool,
+    launch_recent: bool,
     preview_tooltip: bool,
     pointer_glow_preview: bool,
     pointer_glow_position: Pos2,
@@ -1580,7 +1595,7 @@ impl LauncherApp {
             settings.appearance_mode = theme::AppearanceMode::Simple;
         }
         if args.iter().any(|arg| arg == "--clear-liquid-glass") {
-            settings.appearance_mode = theme::AppearanceMode::Liquid;
+            settings.appearance_mode = theme::AppearanceMode::Frosted;
         }
         if args.iter().any(|arg| arg == "--frosted-glass") {
             settings.appearance_mode = theme::AppearanceMode::Frosted;
@@ -1667,6 +1682,12 @@ impl LauncherApp {
         } else {
             default_skin_pixels()
         };
+        let initial_skin_model_alex =
+            if settings.player_skin.is_some() && initial_skin_status.is_none() {
+                detect_slim_skin(&initial_skin_pixels)
+            } else {
+                settings.player_skin_model_alex
+            };
 
         Self {
             selected_version,
@@ -1684,7 +1705,7 @@ impl LauncherApp {
             screenshot_requested: false,
             window_rounded: false,
             game_process_id: None,
-            launch_without_recent: false,
+            launch_recent: false,
             preview_tooltip,
             pointer_glow_preview,
             pointer_glow_position: Pos2::ZERO,
@@ -1740,7 +1761,7 @@ impl LauncherApp {
             resource_detail_direction: 1.0,
             create_tab: initial_create_tab,
             skin_pixels: initial_skin_pixels,
-            skin_model_alex: settings.player_skin_model_alex,
+            skin_model_alex: initial_skin_model_alex,
             skin_color: [76, 175, 80, 255],
             skin_erasing: false,
             skin_preview_yaw: -0.42,
@@ -3120,7 +3141,6 @@ impl LauncherApp {
                 self.saved_settings = self.settings.clone();
             }
             Err(error) => {
-                self.saved_settings = self.settings.clone();
                 self.show_toast(format!("设置自动保存失败：{error}"));
             }
         }
@@ -3811,6 +3831,7 @@ impl LauncherApp {
             && ctx.input(|input| input.key_pressed(egui::Key::Enter))
             && self.launch_started.is_none()
         {
+            self.launch_recent = false;
             self.start_launch(ctx);
         }
     }
@@ -3832,7 +3853,7 @@ impl LauncherApp {
             self.start_version_install(version.version, &version.loader_family, true);
             return;
         }
-        let resume_recent = !self.launch_without_recent;
+        let resume_recent = self.launch_recent;
         let data_directory = self.version_data_directory();
         if self.settings.player_skin.is_some()
             && let Some(directory) = data_directory.as_deref()
@@ -3868,6 +3889,7 @@ impl LauncherApp {
             data_directory,
             java_path,
             player_name: self.settings.player_name.clone(),
+            skin_slim: self.skin_model_alex,
         };
         match crate::game::launch(
             &game_directory,
@@ -3876,7 +3898,7 @@ impl LauncherApp {
             &launch_options,
         ) {
             Ok(details) => {
-                self.launch_without_recent = false;
+                self.launch_recent = false;
                 self.record_version_play(&version.version);
                 self.game_process_id = Some(details.process_id);
                 self.launch_started = Some(Instant::now());
@@ -3888,7 +3910,7 @@ impl LauncherApp {
                 ));
             }
             Err(error) => {
-                self.launch_without_recent = false;
+                self.launch_recent = false;
                 self.game_process_id = None;
                 self.launch_started = None;
                 self.launch_complete = false;
@@ -4064,6 +4086,7 @@ impl LauncherApp {
         theme::configure_effects(
             ctx,
             self.settings.glass_transparency,
+            self.settings.card_edge_clarity,
             self.settings.pointer_brightness,
             self.settings.pointer_radius,
             self.settings.appearance_mode,
@@ -4277,21 +4300,12 @@ impl LauncherApp {
         layout: &Layout,
         time: f64,
     ) {
-        if theme::appearance_mode() == theme::AppearanceMode::Simple {
-            theme::vertical_gradient(
-                painter,
-                layout.titlebar,
-                Color32::from_rgb(255, 255, 255),
-                Color32::from_rgb(244, 246, 242),
-            );
-        } else {
-            theme::vertical_gradient(
-                painter,
-                layout.titlebar,
-                Color32::from_rgba_unmultiplied(12, 18, 14, 248),
-                Color32::from_rgba_unmultiplied(9, 14, 11, 226),
-            );
-        }
+        theme::vertical_gradient(
+            painter,
+            layout.titlebar,
+            Color32::from_rgb(255, 255, 255),
+            Color32::from_rgb(247, 249, 246),
+        );
         theme::soft_orb(
             painter,
             Pos2::new(
@@ -4451,21 +4465,12 @@ impl LauncherApp {
         time: f64,
     ) {
         let mut hovered_tooltip: Option<NavTooltip> = None;
-        if theme::appearance_mode() == theme::AppearanceMode::Simple {
-            theme::vertical_gradient(
-                painter,
-                layout.rail,
-                Color32::from_rgb(252, 253, 251),
-                Color32::from_rgb(240, 242, 238),
-            );
-        } else {
-            theme::vertical_gradient(
-                painter,
-                layout.rail,
-                Color32::from_rgba_unmultiplied(16, 25, 19, 238),
-                Color32::from_rgba_unmultiplied(10, 16, 12, 232),
-            );
-        }
+        theme::vertical_gradient(
+            painter,
+            layout.rail,
+            Color32::from_rgb(255, 255, 255),
+            Color32::from_rgb(246, 248, 245),
+        );
         theme::soft_orb(
             painter,
             Pos2::new(layout.rail.center().x, TITLEBAR_HEIGHT + 200.0),
@@ -4671,6 +4676,7 @@ impl LauncherApp {
             painter,
             Rect::from_center_size(layout.rail_profile.center(), Vec2::splat(29.0)),
             theme::RADIUS,
+            self.skin_texture.as_ref(),
         );
         painter.circle_filled(
             layout.rail_profile.right_bottom() + Vec2::new(-4.0, -4.0),
@@ -4755,6 +4761,7 @@ impl LauncherApp {
         layout: &Layout,
         time: f64,
     ) {
+        self.ensure_skin_texture(ctx);
         let heading_painter = painter.clone();
         let game_directory_ready = self.settings.game_directory.is_some();
         if let Some(previous_page) = self.previous_page {
@@ -4961,7 +4968,6 @@ impl LauncherApp {
         let hero = motion.rect(source_hero);
         theme::fill_round(painter, hero, theme::RADIUS, Color32::from_rgb(14, 24, 19));
         let world_rect = hero.shrink(8.0);
-        let simple = theme::appearance_mode() == theme::AppearanceMode::Simple;
         if let Some(background) = self.hero_background_texture.clone() {
             paint_rounded_image(
                 painter,
@@ -4971,65 +4977,33 @@ impl LauncherApp {
                 background.size(),
             );
             let image_layer = painter.clone();
-            if simple {
-                theme::horizontal_fade(
-                    &image_layer,
-                    world_rect,
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 232),
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 132),
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 18),
-                );
-                theme::vertical_gradient(
-                    &image_layer,
-                    Rect::from_min_max(
-                        Pos2::new(
-                            world_rect.left(),
-                            world_rect.bottom() - world_rect.height() * 0.38,
-                        ),
-                        world_rect.right_bottom(),
+            theme::horizontal_fade(
+                &image_layer,
+                world_rect,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 232),
+                Color32::from_rgba_unmultiplied(255, 255, 255, 132),
+                Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+            );
+            theme::vertical_gradient(
+                &image_layer,
+                Rect::from_min_max(
+                    Pos2::new(
+                        world_rect.left(),
+                        world_rect.bottom() - world_rect.height() * 0.38,
                     ),
-                    Color32::TRANSPARENT,
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 166),
-                );
-            } else {
-                theme::horizontal_fade(
-                    &image_layer,
-                    world_rect,
-                    Color32::from_rgba_unmultiplied(6, 13, 9, 205),
-                    Color32::from_rgba_unmultiplied(7, 15, 10, 76),
-                    Color32::TRANSPARENT,
-                );
-                theme::vertical_gradient(
-                    &image_layer,
-                    Rect::from_min_max(
-                        Pos2::new(
-                            world_rect.left(),
-                            world_rect.bottom() - world_rect.height() * 0.38,
-                        ),
-                        world_rect.right_bottom(),
-                    ),
-                    Color32::TRANSPARENT,
-                    Color32::from_rgba_unmultiplied(5, 11, 7, 176),
-                );
-            }
+                    world_rect.right_bottom(),
+                ),
+                Color32::TRANSPARENT,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 166),
+            );
         } else {
             scene::paint_world(painter, world_rect, time);
-            if simple {
-                theme::horizontal_fade(
-                    painter,
-                    world_rect,
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 218),
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 112),
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 20),
-                );
-            }
-        }
-        if !simple {
-            painter.rect_stroke(
-                hero,
-                theme::RADIUS,
-                Stroke::new(8.0, Color32::from_rgb(14, 24, 19)),
-                StrokeKind::Inside,
+            theme::horizontal_fade(
+                painter,
+                world_rect,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 218),
+                Color32::from_rgba_unmultiplied(255, 255, 255, 112),
+                Color32::from_rgba_unmultiplied(255, 255, 255, 20),
             );
         }
         theme::stroke_round(painter, hero, theme::RADIUS, 1.0, theme::line_strong());
@@ -5450,6 +5424,7 @@ impl LauncherApp {
                 || self.install_receiver.is_some()
                 || self.game_process_id.is_some();
             if !starting {
+                self.launch_recent = recent.is_some();
                 self.start_launch(ctx);
             }
         }
@@ -5723,6 +5698,7 @@ impl LauncherApp {
                     }
                 }
             } else if !starting {
+                self.launch_recent = false;
                 self.start_launch(ctx);
                 ctx.request_repaint();
             }
@@ -10662,15 +10638,9 @@ impl LauncherApp {
         let Some(path) = pick_image_file(false) else {
             return;
         };
-        match image::open(&path) {
-            Ok(image) => {
-                let resized = image::imageops::resize(
-                    &image.to_rgba8(),
-                    64,
-                    64,
-                    image::imageops::FilterType::Nearest,
-                )
-                .into_raw();
+        match load_player_skin(&path) {
+            Ok(resized) => {
+                self.skin_model_alex = detect_slim_skin(&resized);
                 let before = self.skin_pixels.clone();
                 self.skin_pixels = resized;
                 self.skin_history.record(before, &self.skin_pixels);
@@ -10678,7 +10648,15 @@ impl LauncherApp {
                 self.skin_preview_last_face = None;
                 self.skin_stroke_before = None;
                 self.skin_dirty = true;
-                self.skin_status = Some(format!("已导入 {}", path.display()));
+                self.skin_status = Some(format!(
+                    "已导入 {} · {}",
+                    path.display(),
+                    if self.skin_model_alex {
+                        "Alex 细臂"
+                    } else {
+                        "Steve 宽臂"
+                    }
+                ));
             }
             Err(error) => self.skin_status = Some(format!("导入皮肤失败：{error}")),
         }
@@ -10894,30 +10872,7 @@ impl LauncherApp {
             Pos2::new(body.left() + 24.0, body.top() + 24.0),
             Vec2::splat((body.height() - 48.0).min(360.0)),
         );
-        theme::fill_round(
-            painter,
-            canvas,
-            theme::RADIUS,
-            Color32::from_rgb(12, 20, 15),
-        );
-        let cell = canvas.width() / 16.0;
-        for y in 0..16 {
-            for x in 0..16 {
-                if (x + y) % 2 == 0 {
-                    painter.rect_filled(
-                        Rect::from_min_size(
-                            Pos2::new(
-                                canvas.left() + x as f32 * cell,
-                                canvas.top() + y as f32 * cell,
-                            ),
-                            Vec2::splat(cell),
-                        ),
-                        0,
-                        Color32::from_rgb(25, 35, 28),
-                    );
-                }
-            }
-        }
+        theme::fill_round(painter, canvas, theme::RADIUS, Color32::TRANSPARENT);
         if let Some(texture) = self.skin_texture.as_ref() {
             painter.image(
                 texture.id(),
@@ -11493,7 +11448,7 @@ impl LauncherApp {
             true,
         ) {
             self.show_toast("正在启动 Minecraft，请在游戏中选择创建新世界");
-            self.launch_without_recent = true;
+            self.launch_recent = false;
             self.start_launch(ctx);
         }
 
@@ -12314,31 +12269,33 @@ impl LauncherApp {
                     row,
                     "界面风格",
                     match self.settings.appearance_mode {
-                        theme::AppearanceMode::Simple => "白色背景、黑色文字，关闭模糊和鼠标光效",
-                        theme::AppearanceMode::Frosted => "柔和背景模糊与透光，不启用液态折射",
-                        theme::AppearanceMode::Liquid => "实时折射、边缘高光和鼠标局部受光",
+                        theme::AppearanceMode::Simple => "纯白背景、黑色文字，无模糊和折射",
+                        theme::AppearanceMode::Frosted => {
+                            "纯白底上的实时模糊、透光与当前玻璃折射效果"
+                        }
+                        theme::AppearanceMode::Liquid => "液态玻璃将在后续版本开放",
                     },
                 );
                 let simple = Rect::from_min_size(
                     Pos2::new(
-                        row.right() - SETTING_CARD_PADDING_X - 270.0,
+                        row.right() - SETTING_CARD_PADDING_X - 302.0,
                         row.top() + 23.0,
                     ),
                     Vec2::new(76.0, 36.0),
                 );
                 let frosted = Rect::from_min_size(
                     Pos2::new(
-                        row.right() - SETTING_CARD_PADDING_X - 186.0,
+                        row.right() - SETTING_CARD_PADDING_X - 218.0,
                         row.top() + 23.0,
                     ),
-                    Vec2::new(84.0, 36.0),
+                    Vec2::new(88.0, 36.0),
                 );
                 let liquid = Rect::from_min_size(
                     Pos2::new(
-                        row.right() - SETTING_CARD_PADDING_X - 94.0,
-                        row.top() + 23.0,
+                        row.right() - SETTING_CARD_PADDING_X - 110.0,
+                        row.top() + 17.0,
                     ),
-                    Vec2::new(84.0, 36.0),
+                    Vec2::new(102.0, 46.0),
                 );
                 for (button, mode, id) in [
                     (simple, theme::AppearanceMode::Simple, "appearance-simple"),
@@ -12347,7 +12304,6 @@ impl LauncherApp {
                         theme::AppearanceMode::Frosted,
                         "appearance-frosted",
                     ),
-                    (liquid, theme::AppearanceMode::Liquid, "appearance-liquid"),
                 ] {
                     if settings_button(
                         ui,
@@ -12360,6 +12316,35 @@ impl LauncherApp {
                         self.settings.appearance_mode = mode;
                     }
                 }
+                theme::fill_round(
+                    painter,
+                    liquid,
+                    theme::RADIUS,
+                    Color32::from_rgb(236, 238, 235),
+                );
+                theme::stroke_round(
+                    painter,
+                    liquid,
+                    theme::RADIUS,
+                    1.0,
+                    Color32::from_black_alpha(28),
+                );
+                theme::center_text(
+                    painter,
+                    Pos2::new(liquid.center().x, liquid.top() + 13.0),
+                    "液态玻璃",
+                    8.5,
+                    theme::ink_soft(),
+                    false,
+                );
+                theme::center_text(
+                    painter,
+                    Pos2::new(liquid.center().x, liquid.bottom() - 10.0),
+                    "敬请期待",
+                    7.2,
+                    theme::muted(),
+                    false,
+                );
 
                 let row = appearance_row(1, 0);
                 paint_setting_card(painter, row, time);
@@ -12489,6 +12474,28 @@ impl LauncherApp {
                         " FPS",
                     );
                 }
+
+                let row = view.content_motion.rect(Rect::from_min_size(
+                    Pos2::new(
+                        source_row_left,
+                        source_panel.top() + 96.0 + 4.0 * (card_height + row_gap),
+                    ),
+                    Vec2::new(source_row_width, card_height),
+                ));
+                paint_setting_card(painter, row, time);
+                paint_effect_slider(
+                    ui,
+                    painter,
+                    row,
+                    "setting-card-edge-clarity",
+                    "描边清晰度",
+                    "0 为无描边；数值越高，卡片边线越清晰",
+                    &mut self.settings.card_edge_clarity,
+                    0,
+                    100,
+                    5,
+                    "%",
+                );
             }
             SettingsSection::About => {
                 let card = setting_row(row_y, 258.0);
@@ -12882,6 +12889,7 @@ impl LauncherApp {
         layout: &Layout,
         time: f64,
     ) {
+        self.ensure_skin_texture(ctx);
         let rect = profile_menu_rect(layout);
         theme::glass_panel(
             painter,
@@ -12899,6 +12907,7 @@ impl LauncherApp {
                 Vec2::splat(48.0),
             ),
             theme::RADIUS,
+            self.skin_texture.as_ref(),
         );
         theme::text(
             painter,
@@ -13155,7 +13164,7 @@ impl LauncherApp {
                         .is_some_and(|(_, response)| response.clicked())
                         || ui.input(|input| input.key_pressed(egui::Key::Enter))
                     {
-                        self.save_account_name();
+                        self.save_account_name(ctx);
                     }
                 } else {
                     for (button, label) in [(cancel, "取消"), (save, "保存")] {
@@ -13204,13 +13213,24 @@ impl LauncherApp {
         self.account_name_error = None;
     }
 
-    fn save_account_name(&mut self) {
+    fn save_account_name(&mut self, ctx: &egui::Context) {
         match normalize_player_name(&self.account_name_input) {
             Ok(name) => {
+                let previous = self.settings.player_name.clone();
                 self.settings.player_name = name.clone();
-                self.account_name_dialog_open = false;
-                self.account_name_error = None;
-                self.show_toast(format!("玩家昵称已更改为 {name}"));
+                match self.settings.save() {
+                    Ok(()) => {
+                        self.saved_settings = self.settings.clone();
+                        self.account_name_dialog_open = false;
+                        self.account_name_error = None;
+                        self.show_toast(format!("玩家昵称已更改为 {name}"));
+                        ctx.request_repaint();
+                    }
+                    Err(error) => {
+                        self.settings.player_name = previous;
+                        self.account_name_error = Some(format!("无法保存昵称：{error}"));
+                    }
+                }
             }
             Err(error) => self.account_name_error = Some(error),
         }
@@ -13261,14 +13281,20 @@ impl LauncherApp {
                 return;
             }
         };
-        self.apply_player_skin_pixels(pixels, ctx, "已更换本地玩家皮肤");
+        self.skin_model_alex = detect_slim_skin(&pixels);
+        let model = if self.skin_model_alex {
+            "Alex 细臂"
+        } else {
+            "Steve 宽臂"
+        };
+        self.apply_player_skin_pixels(pixels, ctx, &format!("已更换本地玩家皮肤 · {model}"));
     }
 
     fn apply_editor_skin_to_account(&mut self, ctx: &egui::Context) {
         self.apply_player_skin_pixels(self.skin_pixels.clone(), ctx, "当前皮肤已应用到本地玩家");
     }
 
-    fn apply_player_skin_pixels(&mut self, pixels: Vec<u8>, _ctx: &egui::Context, message: &str) {
+    fn apply_player_skin_pixels(&mut self, pixels: Vec<u8>, ctx: &egui::Context, message: &str) {
         let path = match save_player_skin(&pixels) {
             Ok(path) => path,
             Err(error) => {
@@ -13301,6 +13327,8 @@ impl LauncherApp {
                 .clone()
                 .unwrap_or_else(|| message.to_owned()),
         );
+        self.persist_settings();
+        ctx.request_repaint();
     }
 
     fn paint_news_dialog(
@@ -14219,45 +14247,7 @@ impl App for LauncherApp {
     }
 }
 
-fn paint_ambient_background(painter: &Painter, screen: Rect, time: f64) {
-    if theme::appearance_mode() == theme::AppearanceMode::Simple {
-        return;
-    }
-    theme::vertical_gradient(
-        painter,
-        screen,
-        Color32::from_rgb(11, 17, 13),
-        Color32::from_rgb(7, 12, 9),
-    );
-    let drift = ((time * 0.025) as f32).sin();
-    theme::soft_orb(
-        painter,
-        Pos2::new(
-            screen.right() - screen.width() * 0.10 + drift * 18.0,
-            screen.top() + screen.height() * 0.12,
-        ),
-        screen.width() * 0.31,
-        Color32::from_rgb(67, 158, 91),
-        17,
-    );
-    theme::soft_orb(
-        painter,
-        Pos2::new(
-            screen.left() + screen.width() * 0.10 - drift * 14.0,
-            screen.bottom() - screen.height() * 0.16,
-        ),
-        screen.width() * 0.24,
-        Color32::from_rgb(81, 118, 152),
-        10,
-    );
-    theme::soft_orb(
-        painter,
-        Pos2::new(screen.center().x + drift * 45.0, screen.bottom() + 40.0),
-        screen.width() * 0.22,
-        theme::GREEN,
-        7,
-    );
-}
+fn paint_ambient_background(_painter: &Painter, _screen: Rect, _time: f64) {}
 
 fn paint_setting_card(painter: &Painter, row: Rect, time: f64) {
     let card = row.shrink2(Vec2::new(0.0, 4.5));
@@ -14813,6 +14803,38 @@ mod tests {
     }
 
     #[test]
+    fn decodes_legacy_skin_and_fills_mirrored_limbs() {
+        let mut legacy = image::RgbaImage::from_pixel(64, 32, image::Rgba([40, 80, 120, 255]));
+        legacy.put_pixel(40, 16, image::Rgba([210, 30, 70, 255]));
+        let pixels =
+            decode_skin_image(image::DynamicImage::ImageRgba8(legacy)).expect("valid legacy skin");
+        assert_eq!(pixels.len(), 64 * 64 * 4);
+        let mirrored = ((48 * 64 + 47) * 4) as usize;
+        assert_eq!(&pixels[mirrored..mirrored + 4], &[210, 30, 70, 255]);
+    }
+
+    #[test]
+    fn decodes_hd_skin_and_rejects_invalid_aspect_ratio() {
+        let hd = image::RgbaImage::from_pixel(128, 128, image::Rgba([20, 30, 40, 255]));
+        let pixels = decode_skin_image(image::DynamicImage::ImageRgba8(hd)).unwrap();
+        assert_eq!(pixels.len(), 64 * 64 * 4);
+
+        let invalid = image::RgbaImage::from_pixel(128, 32, image::Rgba([20, 30, 40, 255]));
+        assert!(decode_skin_image(image::DynamicImage::ImageRgba8(invalid)).is_err());
+    }
+
+    #[test]
+    fn detects_slim_skin_from_unused_arm_columns() {
+        let mut pixels = default_skin_pixels();
+        assert!(!detect_slim_skin(&pixels));
+        for x in [54, 55] {
+            let offset = (20 * 64 + x) * 4;
+            pixels[offset + 3] = 0;
+        }
+        assert!(detect_slim_skin(&pixels));
+    }
+
+    #[test]
     fn installs_local_skin_resource_pack_and_enables_it() {
         let root = std::env::temp_dir().join(format!(
             "genesis-launcher-skin-pack-{}",
@@ -14833,12 +14855,26 @@ mod tests {
         assert!(options.contains(LOCAL_SKIN_PACK_NAME));
         assert!(options.contains("file/Another.zip"));
         let file = std::fs::File::open(&pack).unwrap();
-        let archive = zip::ZipArchive::new(file).unwrap();
-        assert!(
-            archive
-                .file_names()
-                .any(|name| name == "assets/minecraft/textures/entity/player/wide/steve.png")
-        );
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        for model in ["wide", "slim"] {
+            for name in DEFAULT_PLAYER_SKIN_NAMES {
+                let path = format!("assets/minecraft/textures/entity/player/{model}/{name}.png");
+                assert!(
+                    archive.file_names().any(|entry| entry == path),
+                    "missing skin texture {path}"
+                );
+            }
+        }
+        use std::io::Read as _;
+        let mut metadata = String::new();
+        archive
+            .by_name("pack.mcmeta")
+            .unwrap()
+            .read_to_string(&mut metadata)
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(metadata["pack"]["min_format"], serde_json::json!([1, 0]));
+        assert_eq!(metadata["pack"]["max_format"], serde_json::json!(999));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -14934,6 +14970,17 @@ mod tests {
                 && face.depth.is_finite()
         }));
         assert!(faces.windows(2).all(|pair| pair[0].depth <= pair[1].depth));
+    }
+
+    #[test]
+    fn head_avatar_renders_the_outer_3d_skin_layer() {
+        let stage = Rect::from_center_size(Pos2::new(64.0, 64.0), Vec2::splat(48.0));
+        let faces = skin_head_preview_faces(stage, 3.0, -0.48, -0.14);
+        assert!(!faces.is_empty());
+        assert!(
+            faces.iter().any(|face| face.uv.left() >= 0.5),
+            "the 3D head uses the outer-layer atlas at x=32"
+        );
     }
 
     #[test]
@@ -15063,7 +15110,7 @@ mod tests {
         );
         assert_eq!(
             resolve_appearance_mode(0, None, Some(true), Some("clear")),
-            theme::AppearanceMode::Liquid
+            theme::AppearanceMode::Frosted
         );
         assert_eq!(
             resolve_appearance_mode(
@@ -15072,7 +15119,7 @@ mod tests {
                 Some(false),
                 None
             ),
-            theme::AppearanceMode::Liquid
+            theme::AppearanceMode::Frosted
         );
     }
 
@@ -15639,26 +15686,73 @@ fn pick_save_file(
 }
 
 const LOCAL_SKIN_PACK_NAME: &str = "Genesis Launcher Local Skin.zip";
+const DEFAULT_PLAYER_SKIN_NAMES: &[&str] = &[
+    "alex", "ari", "efe", "kai", "makena", "noor", "steve", "sunny", "zuri",
+];
 
 fn load_player_skin(path: &std::path::Path) -> Result<Vec<u8>, String> {
-    let image = image::open(path)
-        .map_err(|error| format!("无法读取皮肤文件：{error}"))?
-        .to_rgba8();
-    if image.width() == 64 && image.height() == 64 {
-        return Ok(image.into_raw());
+    let image = image::open(path).map_err(|error| format!("无法读取皮肤文件：{error}"))?;
+    decode_skin_image(image)
+}
+
+fn decode_skin_image(image: image::DynamicImage) -> Result<Vec<u8>, String> {
+    let (width, height) = (image.width(), image.height());
+    let valid_dimensions = (64..=4096).contains(&width)
+        && width % 64 == 0
+        && (height == width || height.saturating_mul(2) == width);
+    if !valid_dimensions {
+        return Err(format!(
+            "皮肤尺寸 {width}×{height} 无效；请使用 64×64、64×32，或保持相同比例的 64 倍数高清皮肤"
+        ));
     }
-    if image.width() == 64 && image.height() == 32 {
-        let mut pixels = vec![0; 64 * 64 * 4];
-        pixels[..64 * 32 * 4].copy_from_slice(&image.into_raw());
-        return Ok(pixels);
+
+    let target_height = if height == width { 64 } else { 32 };
+    let resized = if width == 64 && height == target_height {
+        image.to_rgba8()
+    } else {
+        image::imageops::resize(
+            &image.to_rgba8(),
+            64,
+            target_height,
+            image::imageops::FilterType::Nearest,
+        )
+    };
+    if target_height == 64 {
+        Ok(resized.into_raw())
+    } else {
+        Ok(expand_legacy_skin(resized.as_raw()))
     }
-    if image.width() == image.height() && image.width() > 64 && image.width() % 64 == 0 {
-        return Ok(
-            image::imageops::resize(&image, 64, 64, image::imageops::FilterType::Nearest)
-                .into_raw(),
-        );
+}
+
+fn expand_legacy_skin(legacy: &[u8]) -> Vec<u8> {
+    let mut modern = vec![0; 64 * 64 * 4];
+    modern[..64 * 32 * 4].copy_from_slice(legacy);
+    copy_mirrored_skin_region(legacy, &mut modern, 40, 16, 32, 48);
+    copy_mirrored_skin_region(legacy, &mut modern, 0, 16, 16, 48);
+    modern
+}
+
+fn copy_mirrored_skin_region(
+    source: &[u8],
+    target: &mut [u8],
+    source_x: usize,
+    source_y: usize,
+    target_x: usize,
+    target_y: usize,
+) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let source_offset = ((source_y + y) * 64 + source_x + (15 - x)) * 4;
+            let target_offset = ((target_y + y) * 64 + target_x + x) * 4;
+            target[target_offset..target_offset + 4]
+                .copy_from_slice(&source[source_offset..source_offset + 4]);
+        }
     }
-    Err("皮肤必须是 64×64、64×32 或 64 倍数的正方形 PNG".to_owned())
+}
+
+fn detect_slim_skin(pixels: &[u8]) -> bool {
+    let alpha_at = |x: usize, y: usize| pixels[(y * 64 + x) * 4 + 3];
+    alpha_at(54, 20) == 0 && alpha_at(55, 20) == 0
 }
 
 fn save_player_skin(pixels: &[u8]) -> Result<PathBuf, String> {
@@ -15692,18 +15786,12 @@ fn install_local_skin_resource_pack(
     let mut archive = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
-    let metadata = r#"{"pack":{"pack_format":34,"description":"Genesis Launcher Local Skin","supported_formats":{"min_inclusive":1,"max_inclusive":999}}}"#;
+    // Snapshot clients above resource format 64 require the split
+    // min_format/max_format fields in addition to the legacy range.
+    let metadata = r#"{"pack":{"pack_format":34,"description":"Genesis Launcher Local Skin","supported_formats":{"min_inclusive":1,"max_inclusive":999},"min_format":[1,0],"max_format":999}}"#;
     for (path, bytes) in [
         ("pack.mcmeta", metadata.as_bytes()),
         ("pack.png", png.as_slice()),
-        (
-            "assets/minecraft/textures/entity/player/wide/steve.png",
-            png.as_slice(),
-        ),
-        (
-            "assets/minecraft/textures/entity/player/slim/alex.png",
-            png.as_slice(),
-        ),
         ("assets/minecraft/textures/entity/steve.png", png.as_slice()),
         ("assets/minecraft/textures/entity/alex.png", png.as_slice()),
     ] {
@@ -15713,6 +15801,19 @@ fn install_local_skin_resource_pack(
         archive
             .write_all(bytes)
             .map_err(|error| format!("无法写入皮肤资源包：{error}"))?;
+    }
+    // Modern clients choose one of several built-in skins from the offline UUID.
+    // Override every wide/slim default so the selected local skin is always used.
+    for model in ["wide", "slim"] {
+        for name in DEFAULT_PLAYER_SKIN_NAMES {
+            let path = format!("assets/minecraft/textures/entity/player/{model}/{name}.png");
+            archive
+                .start_file(path, options)
+                .map_err(|error| format!("无法写入皮肤资源包：{error}"))?;
+            archive
+                .write_all(&png)
+                .map_err(|error| format!("无法写入皮肤资源包：{error}"))?;
+        }
     }
     archive
         .finish()
@@ -16498,22 +16599,116 @@ fn skin_preview_faces(
     alex: bool,
 ) -> Vec<SkinPreviewFace> {
     let light = SkinPoint3::new(-0.32, 0.62, 0.72);
-    let mut faces = Vec::with_capacity(36);
-    for cuboid in skin_cuboids(alex) {
+    let base = skin_cuboids(alex);
+    let outer = skin_outer_layers(base);
+    let mut faces = Vec::with_capacity(72);
+    for (cuboid, inflation) in base
+        .into_iter()
+        .map(|cuboid| (cuboid, 1.0))
+        .chain(outer.into_iter().map(|cuboid| (cuboid, 1.045)))
+    {
+        let center = SkinPoint3::new(
+            (cuboid.min.x + cuboid.max.x) * 0.5,
+            (cuboid.min.y + cuboid.max.y) * 0.5,
+            (cuboid.min.z + cuboid.max.z) * 0.5,
+        );
         for face in skin_cuboid_faces(cuboid) {
             let normal = rotate_skin_point(face.normal, yaw, pitch);
             if normal.z <= 0.001 {
                 continue;
             }
-            let projected = face
-                .points
-                .map(|point| project_skin_point(point, stage, scale, yaw, pitch));
+            let projected = face.points.map(|point| {
+                project_skin_point(
+                    SkinPoint3::new(
+                        center.x + (point.x - center.x) * inflation,
+                        center.y + (point.y - center.y) * inflation,
+                        center.z + (point.z - center.z) * inflation,
+                    ),
+                    stage,
+                    scale,
+                    yaw,
+                    pitch,
+                )
+            });
             let depth = projected.iter().map(|(_, depth)| *depth).sum::<f32>() / 4.0;
             let lighting = (normal.x * light.x + normal.y * light.y + normal.z * light.z).max(0.0);
             let brightness = (214.0 + lighting * 40.0).clamp(0.0, 255.0) as u8;
             faces.push(SkinPreviewFace {
                 key: SkinFaceKey {
                     part: cuboid.part,
+                    face: face.face,
+                },
+                points: projected.map(|(point, _)| point),
+                uv: face.uv,
+                depth,
+                tint: Color32::from_gray(brightness),
+            });
+        }
+    }
+    faces.sort_by(|left, right| left.depth.total_cmp(&right.depth));
+    faces
+}
+
+fn skin_outer_layers(base: [SkinCuboid; 6]) -> [SkinCuboid; 6] {
+    let uvs = [
+        (32.0, 0.0),
+        (16.0, 32.0),
+        (40.0, 32.0),
+        (48.0, 48.0),
+        (0.0, 32.0),
+        (0.0, 48.0),
+    ];
+    let mut outer = base;
+    for (cuboid, (uv_x, uv_y)) in outer.iter_mut().zip(uvs) {
+        cuboid.uv_x = uv_x;
+        cuboid.uv_y = uv_y;
+    }
+    outer
+}
+
+fn skin_head_preview_faces(stage: Rect, scale: f32, yaw: f32, pitch: f32) -> Vec<SkinPreviewFace> {
+    let light = SkinPoint3::new(-0.32, 0.62, 0.72);
+    let head = skin_cuboids(false)[0];
+    let mut hat = head;
+    hat.uv_x = 32.0;
+    hat.uv_y = 0.0;
+    let mut faces = Vec::with_capacity(12);
+    for (cuboid, inflation) in [(head, 1.0), (hat, 1.065)] {
+        let center = SkinPoint3::new(
+            (cuboid.min.x + cuboid.max.x) * 0.5,
+            (cuboid.min.y + cuboid.max.y) * 0.5,
+            (cuboid.min.z + cuboid.max.z) * 0.5,
+        );
+        for face in skin_cuboid_faces(cuboid) {
+            let normal = rotate_skin_point(face.normal, yaw, pitch);
+            if normal.z <= 0.001 {
+                continue;
+            }
+            let mut projected = [(Pos2::ZERO, 0.0); 4];
+            for (index, point) in face.points.into_iter().enumerate() {
+                let relative = rotate_skin_point(
+                    SkinPoint3::new(
+                        (point.x - center.x) * inflation,
+                        (point.y - center.y) * inflation,
+                        (point.z - center.z) * inflation,
+                    ),
+                    yaw,
+                    pitch,
+                );
+                projected[index] = (
+                    Pos2::new(
+                        stage.center().x + relative.x * scale,
+                        stage.center().y - relative.y * scale,
+                    ),
+                    relative.z,
+                );
+            }
+            let depth = projected.iter().map(|(_, depth)| *depth).sum::<f32>() / 4.0;
+            let lighting = (normal.x * light.x + normal.y * light.y + normal.z * light.z).max(0.0);
+            let brightness = (214.0 + lighting * 40.0).clamp(0.0, 255.0) as u8;
+            faces.push(SkinPreviewFace {
+                key: SkinFaceKey {
+                    part: SkinPart::Head,
                     face: face.face,
                 },
                 points: projected.map(|(point, _)| point),
@@ -16557,24 +16752,15 @@ fn skin_face_at<'a>(
     faces.find(|face| face.texture_position(pointer).is_some())
 }
 
-fn paint_rounded_image(
+fn paint_rounded_texture_region(
     painter: &Painter,
     rect: Rect,
     radius: f32,
     texture: &egui::TextureHandle,
-    source_size: [usize; 2],
+    source: Rect,
 ) {
     const CORNER_SEGMENTS: usize = 7;
     let radius = radius.min(rect.width() * 0.5).min(rect.height() * 0.5);
-    let source_aspect = source_size[0] as f32 / source_size[1].max(1) as f32;
-    let target_aspect = rect.width() / rect.height().max(1.0);
-    let (u0, u1, v0, v1) = if source_aspect > target_aspect {
-        let visible = target_aspect / source_aspect;
-        ((1.0 - visible) * 0.5, (1.0 + visible) * 0.5, 0.0, 1.0)
-    } else {
-        let visible = source_aspect / target_aspect;
-        (0.0, 1.0, (1.0 - visible) * 0.5, (1.0 + visible) * 0.5)
-    };
     let corners = [
         (
             Pos2::new(rect.left() + radius, rect.top() + radius),
@@ -16606,8 +16792,8 @@ fn paint_rounded_image(
     }
     let uv = |point: Pos2| {
         Pos2::new(
-            u0 + (point.x - rect.left()) / rect.width() * (u1 - u0),
-            v0 + (point.y - rect.top()) / rect.height() * (v1 - v0),
+            source.left() + (point.x - rect.left()) / rect.width() * source.width(),
+            source.top() + (point.y - rect.top()) / rect.height() * source.height(),
         )
     };
     let mut mesh = egui::Mesh {
@@ -16634,6 +16820,31 @@ fn paint_rounded_image(
         );
     }
     painter.add(Shape::mesh(mesh));
+}
+
+fn paint_rounded_image(
+    painter: &Painter,
+    rect: Rect,
+    radius: f32,
+    texture: &egui::TextureHandle,
+    source_size: [usize; 2],
+) {
+    let source_aspect = source_size[0] as f32 / source_size[1].max(1) as f32;
+    let target_aspect = rect.width() / rect.height().max(1.0);
+    let (u0, u1, v0, v1) = if source_aspect > target_aspect {
+        let visible = target_aspect / source_aspect;
+        ((1.0 - visible) * 0.5, (1.0 + visible) * 0.5, 0.0, 1.0)
+    } else {
+        let visible = source_aspect / target_aspect;
+        (0.0, 1.0, (1.0 - visible) * 0.5, (1.0 + visible) * 0.5)
+    };
+    paint_rounded_texture_region(
+        painter,
+        rect,
+        radius,
+        texture,
+        Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1)),
+    );
 }
 
 struct Layout {
@@ -17179,7 +17390,28 @@ fn paint_window_icon(painter: &Painter, center: Pos2, action: WindowAction, colo
     }
 }
 
-fn paint_avatar(painter: &Painter, rect: Rect, radius: u8) {
+fn paint_avatar(
+    painter: &Painter,
+    rect: Rect,
+    radius: u8,
+    skin_texture: Option<&egui::TextureHandle>,
+) {
+    if let Some(texture) = skin_texture {
+        theme::fill_round(painter, rect, radius, Color32::from_rgb(21, 34, 25));
+        theme::soft_orb(
+            painter,
+            Pos2::new(rect.center().x + 3.0, rect.center().y + 4.0),
+            rect.width() * 0.52,
+            theme::GREEN,
+            9,
+        );
+        let stage = rect.shrink(1.5);
+        let scale = stage.height() / 14.0;
+        let faces = skin_head_preview_faces(stage, scale, -0.48, -0.14);
+        paint_skin_model(painter, texture, &faces);
+        theme::stroke_round(painter, rect, radius, 1.0, theme::alpha(Color32::BLACK, 52));
+        return;
+    }
     theme::fill_round(painter, rect, radius, Color32::from_rgb(211, 160, 110));
     let hair_height = rect.height() * 0.30;
     painter.rect_filled(

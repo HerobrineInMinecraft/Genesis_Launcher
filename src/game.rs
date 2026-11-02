@@ -11,7 +11,8 @@ use zip::ZipArchive;
 
 use crate::brand;
 
-const OFFLINE_UUID: &str = "00000000-0000-3000-8000-000000000001";
+const OFFLINE_WIDE_UUID: &str = "00000000-0000-3000-8000-000000000001";
+const OFFLINE_SLIM_UUID: &str = "00000000-0000-3000-8000-00000000000a";
 const OFFLINE_NAME: &str = "Steve";
 
 #[derive(Debug)]
@@ -32,6 +33,7 @@ pub struct LaunchOptions {
     pub data_directory: Option<PathBuf>,
     pub java_path: Option<PathBuf>,
     pub player_name: String,
+    pub skin_slim: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -52,6 +54,7 @@ impl Default for LaunchOptions {
             data_directory: None,
             java_path: None,
             player_name: OFFLINE_NAME.to_owned(),
+            skin_slim: false,
         }
     }
 }
@@ -549,8 +552,9 @@ fn prepare_launch(
         &libraries_dir,
         &classpath_value,
         separator,
+        &options.player_name,
+        options.skin_slim,
     );
-    placeholders.insert("auth_player_name", options.player_name.clone());
     if let Some(quick_play) = &options.quick_play {
         let (key, value) = match quick_play {
             QuickPlayTarget::World(world) => ("quickPlaySingleplayer", world),
@@ -1240,9 +1244,11 @@ fn placeholders(
     libraries_dir: &Path,
     classpath: &str,
     separator: &str,
+    player_name: &str,
+    skin_slim: bool,
 ) -> HashMap<&'static str, String> {
     HashMap::from([
-        ("auth_player_name", OFFLINE_NAME.to_owned()),
+        ("auth_player_name", player_name.to_owned()),
         ("version_name", version.to_owned()),
         (
             "game_directory",
@@ -1253,7 +1259,15 @@ fn placeholders(
             game_directory.join("assets").to_string_lossy().to_string(),
         ),
         ("assets_index_name", assets.to_owned()),
-        ("auth_uuid", OFFLINE_UUID.to_owned()),
+        (
+            "auth_uuid",
+            if skin_slim {
+                OFFLINE_SLIM_UUID
+            } else {
+                OFFLINE_WIDE_UUID
+            }
+            .to_owned(),
+        ),
         ("auth_access_token", "0".to_owned()),
         ("auth_xuid", "0".to_owned()),
         ("clientid", "0".to_owned()),
@@ -1436,6 +1450,8 @@ mod tests {
             Path::new(r"D:\Minecraft\libraries"),
             "classpath",
             ";",
+            "Alex_Player",
+            true,
         );
         assert_eq!(
             values.get("game_directory").map(String::as_str),
@@ -1445,5 +1461,28 @@ mod tests {
             values.get("assets_root").map(String::as_str),
             Some(r"D:\Minecraft\assets")
         );
+        assert_eq!(
+            values.get("auth_player_name").map(String::as_str),
+            Some("Alex_Player")
+        );
+        assert_eq!(
+            values.get("auth_uuid").map(String::as_str),
+            Some(OFFLINE_SLIM_UUID)
+        );
+    }
+
+    #[test]
+    fn offline_uuids_select_the_requested_player_model() {
+        fn default_skin_bucket(uuid: &str) -> i32 {
+            let raw = uuid.replace('-', "");
+            let value = u128::from_str_radix(&raw, 16).unwrap();
+            let high = (value >> 64) as u64;
+            let low = value as u64;
+            let hash = ((high ^ low) as u32) as i32;
+            hash.rem_euclid(18)
+        }
+
+        assert!(default_skin_bucket(OFFLINE_SLIM_UUID) < 9);
+        assert!(default_skin_bucket(OFFLINE_WIDE_UUID) >= 9);
     }
 }
